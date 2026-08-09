@@ -769,7 +769,12 @@ func applyFrame(_ element: AXUIElement, _ target: CGRect, setSize: Bool, appElem
 
 **「2回設定」問題について**: 一部のアプリは position 設定後の size 設定で位置を勝手に補正する。従来のWMは `position → size → position` と3回設定して対処するが、IPCが1.5倍になる。
 
-**本プロジェクトの方針**: 3回設定はしない。代わりに **`kAXWindowMovedNotification` / `kAXWindowResizedNotification` で実際の結果を観測し、目標とずれていた場合のみ補正を1回発行する。** 正常なアプリでは補正が発生せず、問題のあるアプリでのみコストを払う。
+**本プロジェクトの方針**: 3回設定はしない。代わりに、適用後に位置とサイズを**1往復のバッチ読み**で確認し、目標とずれていた場合のみ補正を1回発行する。
+
+> **訂正（Phase 1 で判明）**: 当初「AX 通知で追加の IPC なしに結果を観測できる」と書いていたが誤り。
+> `AXWindowMoved` / `AXWindowResized` は「動いた」ことしか伝えず、位置を知るには読み取りが要る。
+> さらに自前の適用でも通知が飛ぶため、無条件に読み戻すと往復が 1.5 倍になる。
+> 読み戻しは「適用完了時に1回だけ」または「過去に暴れたアプリのみ」に限定すること。
 
 ```swift
 // AX通知受信時（Main）

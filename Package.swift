@@ -15,13 +15,17 @@ let package = Package(
         // ここ以外から AX API を直接呼んではならない。
         .target(name: "CometAccessibility", dependencies: ["CometSupport"]),
 
+        // 状態機械とレイアウト。副作用のない計算はここに集める。
+        .target(name: "CometCore", dependencies: ["CometSupport", "CometAccessibility"]),
+
         .executableTarget(
             name: "comet",
-            dependencies: ["CometSupport", "CometInput", "CometAccessibility"]
+            dependencies: ["CometSupport", "CometInput", "CometAccessibility", "CometCore"]
         ),
 
         .testTarget(name: "CometSupportTests", dependencies: ["CometSupport"]),
         .testTarget(name: "CometInputTests", dependencies: ["CometInput"]),
         .testTarget(name: "CometAccessibilityTests", dependencies: ["CometAccessibility"]),
+        .testTarget(name: "CometCoreTests", dependencies: ["CometCore"]),
     ]
 )

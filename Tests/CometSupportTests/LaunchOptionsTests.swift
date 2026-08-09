@@ -80,6 +80,13 @@ struct LaunchOptionsTests {
         #expect(try LaunchOptions.parse(["--print-keys"]).printKeys)
     }
 
+    // 他の WM が動いている状態でも、レイアウト計算だけを検証できるようにする。
+    @Test("--dry-run はウィンドウを動かさない指定")
+    func dryRunFlag() throws {
+        #expect(try LaunchOptions.parse([]).dryRun == false)
+        #expect(try LaunchOptions.parse(["--dry-run"]).dryRun)
+    }
+
     @Test("未知のフラグはエラー")
     func unknownFlag() {
         #expect(throws: LaunchOptionsError.unknownFlag("--turbo")) {

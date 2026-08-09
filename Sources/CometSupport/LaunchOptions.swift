@@ -31,6 +31,9 @@ public struct LaunchOptions: Equatable, Sendable {
     public var hotkeys: [String] = []
     public var showHelp: Bool = false
     public var printKeys: Bool = false
+    /// レイアウトを計算するがウィンドウは動かさない。
+    /// 他のウィンドウマネージャが動いている環境で検証するために使う。
+    public var dryRun: Bool = false
 
     public init() {}
 
@@ -43,11 +46,16 @@ public struct LaunchOptions: Equatable, Sendable {
         オプション:
           --log-level <level>   ログレベル (\(LogLevel.allCases.map(\.name).joined(separator: "|")))
                                 既定: info
-          --hotkey <spec>       登録するホットキー。複数回指定できる。
+          --hotkey <spec>       押下をログに出すだけの確認用ホットキー。複数回指定できる。
                                 例: --hotkey alt-h --hotkey cmd-shift-space
-                                省略時は動作確認用の既定バインドを登録する。
+          --dry-run             レイアウトを計算するがウィンドウは動かさない。
+                                他のウィンドウマネージャが動いている環境での検証用。
           --print-keys          指定できるキー名を一覧表示して終了する
           --help, -h            このヘルプを表示して終了する
+
+        常駐中のホットキー:
+          ctrl-alt-shift-q      終了
+          ctrl-alt-shift-r      再配置
 
         ホットキーの書式:
           修飾キーとキーをハイフンで連ねる。修飾キーは cmd / alt / ctrl / shift
@@ -93,6 +101,10 @@ public struct LaunchOptions: Equatable, Sendable {
 
             case "--print-keys":
                 options.printKeys = true
+                index += 1
+
+            case "--dry-run":
+                options.dryRun = true
                 index += 1
 
             case "--log-level":

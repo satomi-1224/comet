@@ -1,0 +1,215 @@
+import CoreGraphics
+import Testing
+
+@testable import CometCore
+
+/// Phase 1 の暫定レイアウト（spiral）。Phase 2 で BSP ツリーに置き換える。
+///
+/// 座標は全て AX 系（左上原点・Y は下向き）。したがって「上」は minY 側。
+@Suite("SimpleLayout / Gaps")
+struct SimpleLayoutTests {
+
+    private let screen = CGRect(x: 0, y: 0, width: 1000, height: 600)
+
+    private func spiral(_ count: Int, gaps: Gaps = .zero, in area: CGRect? = nil) -> [CGRect] {
+        SimpleLayout.spiral(count: count, in: area ?? screen, gaps: gaps)
+    }
+
+    // MARK: - Gaps
+
+    @Test("外周ギャップは AX 座標系で上が minY 側に効く")
+    func outerGapsUseTopLeftOrigin() {
+        let gaps = Gaps(
+            innerHorizontal: 0, innerVertical: 0,
+            outerTop: 10, outerBottom: 20, outerLeft: 30, outerRight: 40)
+        let usable = gaps.usableArea(in: screen)
+
+        #expect(usable.minX == 30, "左")
+        #expect(usable.minY == 10, "上（AX では minY 側）")
+        #expect(usable.maxX == 960, "右")
+        #expect(usable.maxY == 580, "下（AX では maxY 側）")
+    }
+
+    @Test("一律指定の簡易イニシャライザ")
+    func uniformInitializer() {
+        let gaps = Gaps(inner: 5, outer: 5)
+        #expect(gaps.innerHorizontal == 5)
+        #expect(gaps.innerVertical == 5)
+        #expect(gaps.outerTop == 5)
+        #expect(gaps.outerBottom == 5)
+        #expect(gaps.outerLeft == 5)
+        #expect(gaps.outerRight == 5)
+    }
+
+    @Test("zero は領域を変えない")
+    func zeroGapsPreserveArea() {
+        #expect(Gaps.zero.usableArea(in: screen) == screen)
+    }
+
+    @Test("外周ギャップが領域より大きければ空になる")
+    func oversizedOuterGapsCollapse() {
+        let usable = Gaps(inner: 0, outer: 600).usableArea(in: screen)
+        #expect(usable.width <= 0 || usable.height <= 0)
+    }
+
+    // MARK: - 形状
+
+    @Test("ウィンドウが無ければ何も返さない")
+    func zeroWindows() {
+        #expect(spiral(0).isEmpty)
+        #expect(spiral(-1).isEmpty)
+    }
+
+    @Test("1枚なら利用可能領域いっぱいになる")
+    func singleWindowFillsUsableArea() {
+        let gaps = Gaps(inner: 5, outer: 10)
+        #expect(spiral(1, gaps: gaps) == [gaps.usableArea(in: screen)])
+    }
+
+    // 横長の領域では最初の分割が左右になる（AeroSpace の default-root-container-orientation = auto 相当）。
+    @Test("2枚は左右に並ぶ")
+    func twoWindowsSplitLeftRight() {
+        let rects = spiral(2)
+        #expect(rects.count == 2)
+        #expect(rects[0].minY == rects[1].minY, "上端が揃う")
+        #expect(rects[0].height == rects[1].height, "高さが揃う")
+        #expect(rects[0].maxX <= rects[1].minX, "左右に並ぶ")
+        #expect(rects[0].width == 500)
+        #expect(rects[1].width == 500)
+    }
+
+    // 3枚目は2枚目の領域を上下に割る。
+    @Test("3枚なら右側が上下に分かれる")
+    func threeWindowsStackOnTheRight() {
+        let rects = spiral(3)
+        #expect(rects.count == 3)
+
+        let left = rects[0]
+        let topRight = rects[1]
+        let bottomRight = rects[2]
+
+        #expect(left.height == screen.height, "左は全高")
+        #expect(topRight.minX == bottomRight.minX, "右の2枚は左端が揃う")
+        #expect(topRight.width == bottomRight.width, "右の2枚は幅が揃う")
+        #expect(topRight.maxY <= bottomRight.minY, "上下に並ぶ")
+        #expect(topRight.minX >= left.maxX, "左より右にある")
+    }
+
+    // 4枚目は3枚目の領域を左右に割る。分割方向が交互に切り替わるのが spiral。
+    @Test("4枚なら最後の2枚が横並びになる")
+    func fourWindowsEndSideBySide() {
+        let rects = spiral(4)
+        #expect(rects.count == 4)
+
+        let left = rects[0]
+        let topRight = rects[1]
+        let bottomLeft = rects[2]
+        let bottomRight = rects[3]
+
+        #expect(left.height == screen.height, "左は全高")
+        #expect(topRight.width == bottomLeft.width + bottomRight.width, "下段が上段の幅を分け合う")
+        #expect(bottomLeft.minY == bottomRight.minY, "最後の2枚は上端が揃う")
+        #expect(bottomLeft.height == bottomRight.height, "最後の2枚は高さが揃う")
+        #expect(bottomLeft.maxX <= bottomRight.minX, "最後の2枚は横並び")
+        #expect(bottomLeft.minY >= topRight.maxY, "上段より下にある")
+    }
+
+    // 縦長の領域では最初の分割が上下になる。
+    @Test("縦長の領域では最初の分割が上下になる")
+    func tallAreaSplitsVerticallyFirst() {
+        let tall = CGRect(x: 0, y: 0, width: 600, height: 1000)
+        let rects = spiral(2, in: tall)
+        #expect(rects[0].width == tall.width, "全幅")
+        #expect(rects[0].maxY <= rects[1].minY, "上下に並ぶ")
+    }
+
+    // MARK: - 不変条件
+
+    @Test("重なりが出ない", arguments: 1...8)
+    func noOverlaps(count: Int) {
+        let rects = spiral(count, gaps: Gaps(inner: 5, outer: 5))
+        for i in 0..<rects.count {
+            for j in (i + 1)..<rects.count {
+                let overlap = rects[i].intersection(rects[j])
+                #expect(
+                    overlap.isNull || overlap.width == 0 || overlap.height == 0,
+                    "\(i) と \(j) が重なっている: \(rects[i]) / \(rects[j])")
+            }
+        }
+    }
+
+    @Test("外周は利用可能領域にぴったり接する", arguments: 1...8)
+    func edgesTouchUsableArea(count: Int) {
+        let gaps = Gaps(inner: 5, outer: 5)
+        let usable = gaps.usableArea(in: screen)
+        let rects = spiral(count, gaps: gaps)
+
+        #expect(rects.map(\.minX).min() == usable.minX, "左端")
+        #expect(rects.map(\.maxX).max() == usable.maxX, "右端")
+        #expect(rects.map(\.minY).min() == usable.minY, "上端")
+        #expect(rects.map(\.maxY).max() == usable.maxY, "下端")
+    }
+
+    @Test("隣接する分割の間隔はギャップと厳密に一致する")
+    func gapsAreExact() {
+        let gaps = Gaps(inner: 5, outer: 5)
+        let rects = spiral(4, gaps: gaps)
+
+        // 左と右上のあいだ（水平方向の分割）
+        #expect(rects[1].minX - rects[0].maxX == gaps.innerHorizontal)
+        // 右上と右下のあいだ（垂直方向の分割）
+        #expect(rects[2].minY - rects[1].maxY == gaps.innerVertical)
+        // 右下の2枚のあいだ（水平方向の分割）
+        #expect(rects[3].minX - rects[2].maxX == gaps.innerHorizontal)
+    }
+
+    @Test("全ての矩形は 0.5pt 格子に載る", arguments: 1...8)
+    func rectsSitOnRetinaGrid(count: Int) {
+        let area = CGRect(x: 0, y: 0, width: 1001, height: 601)
+        let rects = SimpleLayout.spiral(
+            count: count, in: area, gaps: Gaps(inner: 5, outer: 5), scale: 2)
+        for rect in rects {
+            #expect(rect.minX * 2 == (rect.minX * 2).rounded())
+            #expect(rect.maxX * 2 == (rect.maxX * 2).rounded())
+            #expect(rect.minY * 2 == (rect.minY * 2).rounded())
+            #expect(rect.maxY * 2 == (rect.maxY * 2).rounded())
+        }
+    }
+
+    @Test("領域が狭すぎる場合は何も返さない")
+    func tooSmallAreaYieldsNothing() {
+        let tiny = CGRect(x: 0, y: 0, width: 10, height: 10)
+        #expect(spiral(3, gaps: Gaps(inner: 5, outer: 20), in: tiny).isEmpty)
+    }
+
+    // 分割を重ねると領域が尽きる。負の寸法を返してはいけない。
+    @Test("領域が尽きても負の寸法にならない")
+    func neverProducesNegativeSize() {
+        let area = CGRect(x: 0, y: 0, width: 120, height: 120)
+        let rects = SimpleLayout.spiral(count: 24, in: area, gaps: Gaps(inner: 5, outer: 5))
+        for rect in rects {
+            #expect(rect.width >= 0)
+            #expect(rect.height >= 0)
+        }
+    }
+
+    @Test("要求した枚数だけ返す", arguments: 1...12)
+    func returnsRequestedCount(count: Int) {
+        #expect(spiral(count, gaps: Gaps(inner: 5, outer: 5)).count == count)
+    }
+
+    // 範囲外の比率は「手前側が領域内に収まる」という分割の前提を壊す。
+    @Test("範囲外の分割比は丸められる", arguments: [-1.0, 0.0, 1.0, 2.0] as [CGFloat])
+    func outOfRangeRatioIsClamped(ratio: CGFloat) {
+        let rects = SimpleLayout.spiral(count: 4, in: screen, gaps: .zero, ratio: ratio)
+        #expect(rects.count == 4)
+        for rect in rects {
+            #expect(rect.width >= 0)
+            #expect(rect.height >= 0)
+            #expect(rect.minX >= screen.minX)
+            #expect(rect.maxX <= screen.maxX)
+            #expect(rect.minY >= screen.minY)
+            #expect(rect.maxY <= screen.maxY)
+        }
+    }
+}

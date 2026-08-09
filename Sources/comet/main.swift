@@ -1,15 +1,15 @@
 import AppKit
 import Foundation
 import CometAccessibility
+import CometCore
 import CometInput
 import CometSupport
 
-// Phase 0 の到達点:
-//   「ホットキーを押すとログが出る。アクセシビリティ権限が正しく取得できている」
+// Phase 1 の到達点:
+//   「ウィンドウを開くと自動的にタイルされ、閉じると再配置される」
 //
 // main.swift のトップレベルコードは Swift 6 では @MainActor 隔離される。
-// ここから同期 AX 呼び出しを行わないという規律は Phase 1 以降も維持すること
-// （設計書 §4.2）。
+// ここから同期 AX 呼び出しを行わないという規律は最後まで維持すること（設計書 §4.2）。
 
 // MARK: - ヘルパー
 
@@ -136,41 +136,53 @@ do {
     fail("\(error)")
 }
 
-// AeroSpace が alt-* を掴んでいる間は衝突するため、既定は ctrl-alt-shift-* にしてある。
-let defaultSpecs = [
-    "ctrl-alt-shift-h", "ctrl-alt-shift-j", "ctrl-alt-shift-k", "ctrl-alt-shift-l",
-]
-let specs = options.hotkeys.isEmpty ? defaultSpecs : options.hotkeys
-
-if options.hotkeys.isEmpty {
-    log.info("--hotkey の指定がないため既定のバインドを使う")
+// 利用者が --hotkey で指定したものは、押下をログに出すだけの動作確認用。
+if !options.hotkeys.isEmpty {
+    _ = registerHotkeys(specs: options.hotkeys, manager: hotkeyManager, log: log) { hotkey in
+        Log.shared.info("押下: \(hotkey)")
+    }
 }
 
-let registeredCount = registerHotkeys(specs: specs, manager: hotkeyManager, log: log) { hotkey in
-    Log.shared.info("押下: \(hotkey)")
-}
+// MARK: - エンジン
 
-guard registeredCount > 0 else {
-    fail(
+// AeroSpace が動いていると互いのウィンドウ配置を上書きし合って発振する。
+if !NSRunningApplication.runningApplications(withBundleIdentifier: "bobko.aerospace").isEmpty {
+    log.warn(
         """
-        ホットキーを1つも登録できなかった。
-        他のプロセス（AeroSpace / Hammerspoon / Raycast など）が同じキーを掴んでいる可能性がある。
+        AeroSpace が動作している。両方が動くとウィンドウ配置を奪い合って発振する。
+        検証中は停止すること: osascript -e 'quit app "AeroSpace"'
         """)
 }
 
-// 常駐プロセスなので、キーボードから止める手段を用意しておく。
-// 利用者指定のキーと衝突しうるので失敗は致命的としない。
-let quitSpec = "ctrl-alt-shift-q"
-if let quitHotkey = try? KeySpec.parse(quitSpec) {
+if options.dryRun {
+    log.info("dry-run: レイアウトを計算するがウィンドウは動かさない")
+}
+
+let engine = Engine(gaps: Gaps(inner: 5, outer: 5), dryRun: options.dryRun, log: log)
+engine.start()
+
+// MARK: - 制御用ホットキー
+
+// 常駐プロセスなので、キーボードから止める手段と再配置の手段を用意しておく。
+// 利用者指定のキーと衝突しうるので登録失敗は致命的としない。
+@MainActor
+func registerControlHotkey(_ spec: String, label: String, action: @escaping @MainActor () -> Void) {
     do {
-        try hotkeyManager.register(quitHotkey) { _ in
-            Log.shared.info("終了ホットキーを受信した")
-            NSApp.terminate(nil)
-        }
-        log.info("終了ホットキー: \(quitSpec)")
+        try hotkeyManager.register(KeySpec.parse(spec)) { _ in action() }
+        log.info("\(label): \(spec)")
     } catch {
-        log.warn("終了ホットキーを登録できなかった: \(error)")
+        log.warn("\(label) を登録できなかった: \(error)")
     }
+}
+
+registerControlHotkey("ctrl-alt-shift-q", label: "終了") {
+    Log.shared.info("終了ホットキーを受信した")
+    NSApp.terminate(nil)
+}
+
+registerControlHotkey("ctrl-alt-shift-r", label: "再配置") {
+    Log.shared.info("再配置を要求された")
+    engine.relayout()
 }
 
 // MARK: - シグナル
@@ -188,7 +200,7 @@ interruptSource.resume()
 
 // MARK: - 実行
 
-log.info("\(hotkeyManager.registeredCount) 個のホットキーを登録した。押すとログが出る。")
+log.info("起動完了。ホットキー \(hotkeyManager.registeredCount) 個。ウィンドウの走査を開始した。")
 application.run()
 
 // run() から戻るのは終了時のみ。ロックを最後まで生かしておくために参照する。
