@@ -60,6 +60,11 @@ public final class Engine: WindowResolving {
     /// 例: Chrome の最小高さは実測 469pt。
     private var minimumSizes: [CGWindowID: CGSize] = [:]
 
+    /// レイアウトが定めた矩形。外部から動かされたときの戻し先になる。
+    private var desiredFrames: [CGWindowID: CGRect] = [:]
+    /// 復元の頻度制限用。
+    private var restoreAttempts: [CGWindowID: (since: Date, count: Int)] = [:]
+
     public var gaps: Gaps
     /// レイアウトを計算するがウィンドウは動かさない。
     /// 他の WM が動いている環境でも安全に検証できるようにするための逃げ道。
@@ -232,6 +237,8 @@ public final class Engine: WindowResolving {
             }
             scheduler.forget(id)
             minimumSizes.removeValue(forKey: id)
+            desiredFrames.removeValue(forKey: id)
+            restoreAttempts.removeValue(forKey: id)
         }
         observerHub.detach(pid: pid)
         applierPool.removeQueue(for: pid)
@@ -292,11 +299,8 @@ public final class Engine: WindowResolving {
             // 最小化は一時的な除外理由なので、状態が変わったら評価し直す。
             refreshWindow(element, pid: pid)
 
-        case .windowMoved, .windowResized:
-            // Phase 1 では読み戻さない。通知は「動いた」ことしか伝えず、
-            // 位置を知るには追加の IPC が要る。自前の適用でも通知は飛ぶため、
-            // 無条件に読み戻すと往復が 1.5 倍になる。突き合わせは Phase 4 で入れる。
-            break
+        case .windowMoved(_, let element), .windowResized(_, let element):
+            restoreIfDisturbed(element)
 
         case .focusedWindowChanged, .applicationActivated:
             // Phase 2 以降で使う。
@@ -337,6 +341,54 @@ public final class Engine: WindowResolving {
         }
     }
 
+    /// 外部から動かされたウィンドウを、レイアウトが定めた位置へ戻す。
+    ///
+    /// レイアウトが唯一の正なので、手で動かしたりアプリが自分で動いたりしても
+    /// 元へ戻す。これが無いとレイアウトは簡単に崩れる。
+    ///
+    /// 自分の適用でも移動・リサイズ通知は飛ぶため、区別しないと
+    /// 自分の適用に反応して適用し直す無限ループになる。
+    /// ``FrameScheduler/isSettling(_:)`` で適用中と直後の猶予を除外する。
+    private func restoreIfDisturbed(_ element: AXElement) {
+        guard let id = idsByElement[element],
+            let desired = desiredFrames[id],
+            registry[id]?.disposition.isTiled == true
+        else { return }
+
+        guard !scheduler.isSettling(id) else { return }
+
+        // 暴れるアプリと押し合いにならないよう、短時間に繰り返すなら諦める。
+        guard allowRestore(id) else { return }
+
+        log.debug("[\(id)] が外部から動かされた。レイアウトへ戻す")
+        scheduler.reapply(id, TargetFrame(rect: desired))
+    }
+
+    /// 復元の頻度制限。自分で動き続けるアプリと無限に押し合わないための歯止め。
+    private func allowRestore(_ id: CGWindowID) -> Bool {
+        let now = Date()
+        var record = restoreAttempts[id] ?? (since: now, count: 0)
+
+        if now.timeIntervalSince(record.since) > Self.restoreWindow {
+            record = (since: now, count: 0)
+        }
+        record.count += 1
+        restoreAttempts[id] = record
+
+        if record.count > Self.maxRestoresPerWindow {
+            if record.count == Self.maxRestoresPerWindow + 1 {
+                log.warn(
+                    "[\(id)] が \(Int(Self.restoreWindow)) 秒で \(Self.maxRestoresPerWindow) 回以上動かされた。"
+                        + "復元を一旦止める（アプリが自分で動かしている可能性）")
+            }
+            return false
+        }
+        return true
+    }
+
+    private static let restoreWindow: TimeInterval = 2
+    private static let maxRestoresPerWindow = 5
+
     private func releaseWindow(_ element: AXElement) {
         // 破棄された要素には問い合わせられないので、逆引きで ID を得る。
         guard let id = idsByElement.removeValue(forKey: element) else { return }
@@ -344,6 +396,8 @@ public final class Engine: WindowResolving {
         registry.remove(id)
         scheduler.forget(id)
         minimumSizes.removeValue(forKey: id)
+        desiredFrames.removeValue(forKey: id)
+        restoreAttempts.removeValue(forKey: id)
         observerHub.unobserve(window: element)
         log.debug("削除 [\(id)]")
         relayout()
@@ -400,6 +454,8 @@ public final class Engine: WindowResolving {
             }
             targets[id] = TargetFrame(rect: rect)
             order.append(id)
+            // 外部から動かされたときの戻し先として覚えておく。
+            desiredFrames[id] = rect
         }
         if degenerate > 0 {
             log.warn("領域が足りず \(degenerate) 枚を配置できなかった（ウィンドウ \(tiled.count) 枚）")

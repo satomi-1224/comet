@@ -255,6 +255,23 @@ struct FrameCoalescerTests {
         #expect(coalescer.appliedFrame(1) == nil, "履歴だけが消える")
     }
 
+    // 自分の適用でも AX の移動・リサイズ通知は飛ぶ。これを外部からの変更と誤認すると
+    // 自分の適用に反応して適用し直す無限ループになるので、区別できる必要がある。
+    @Test("isActive で自分の適用中かどうかを判定できる")
+    func isActiveTracksOwnWork() {
+        var coalescer = FrameCoalescer()
+        #expect(!coalescer.isActive(1))
+
+        coalescer.submit(1, target(100))
+        #expect(coalescer.isActive(1), "待機中")
+
+        _ = coalescer.drain()
+        #expect(coalescer.isActive(1), "適用中")
+
+        coalescer.complete(1)
+        #expect(!coalescer.isActive(1), "完了後は自分の作業ではない")
+    }
+
     @Test("知らないウィンドウの invalidate は無害")
     func invalidateUnknownIsHarmless() {
         var coalescer = FrameCoalescer()

@@ -153,6 +153,11 @@ public struct FrameCoalescer {
     public var pendingCount: Int { pending.count }
     public var inFlightCount: Int { inFlight.count }
 
+    /// 待機中または適用中か。外部からの変更と自分の適用を区別するのに使う。
+    public func isActive(_ windowID: CGWindowID) -> Bool {
+        pending[windowID] != nil || inFlight.contains(windowID)
+    }
+
     /// 最後に発行した矩形。AX 通知で観測した実結果との突き合わせに使う。
     public func appliedFrame(_ windowID: CGWindowID) -> CGRect? {
         applied[windowID]?.rect

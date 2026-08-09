@@ -85,4 +85,31 @@ struct FrameSchedulerTests {
         scheduler.forget(999)
         #expect(scheduler.isIdle)
     }
+
+    // 外部から動かされたウィンドウを戻すには、自分の適用による通知と
+    // 区別できなければならない。区別を誤ると自分の適用に反応して押し合いになる。
+    @Test("何もしていないウィンドウは落ち着いている扱い")
+    func idleWindowIsNotSettling() {
+        let scheduler = makeScheduler()
+        scheduler.setResolver(EmptyResolver())
+        #expect(!scheduler.isSettling(1))
+    }
+
+    @Test("投入したウィンドウは適用が片付くまで落ち着いていない扱い")
+    func submittedWindowIsSettling() {
+        let scheduler = makeScheduler()
+        // リゾルバ未設定だと drain 前に捨てられてしまうので、
+        // 投入直後の状態だけを見る。
+        scheduler.submit(1, TargetFrame(rect: CGRect(x: 0, y: 0, width: 10, height: 10)))
+        // 解決できず捨てられた後なので、落ち着いた状態に戻っている
+        #expect(!scheduler.isSettling(1))
+    }
+
+    @Test("reapply は未解決でも詰まらない")
+    func reapplyWithoutResolverIsHarmless() {
+        let scheduler = makeScheduler()
+        scheduler.setResolver(EmptyResolver())
+        scheduler.reapply(1, TargetFrame(rect: CGRect(x: 0, y: 0, width: 10, height: 10)))
+        #expect(scheduler.isIdle)
+    }
 }

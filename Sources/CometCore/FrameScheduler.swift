@@ -35,6 +35,8 @@ public final class FrameScheduler {
     private var isTicking = false
     /// 目標どおりにならなかったウィンドウの補正回数。目標が変われば数え直す。
     private var corrections: [CGWindowID: (target: CGRect, count: Int)] = [:]
+    /// 最後に適用を終えた時刻。自分の適用による通知を外部からの変更と誤認しないために使う。
+    private var settledAt: [CGWindowID: Date] = [:]
 
     public init(
         applierPool: ApplierPool,
@@ -76,6 +78,7 @@ public final class FrameScheduler {
     public func forget(_ id: CGWindowID) {
         coalescer.forget(id)
         corrections.removeValue(forKey: id)
+        settledAt.removeValue(forKey: id)
     }
 
     // MARK: - 駆動
@@ -129,8 +132,29 @@ public final class FrameScheduler {
         }
     }
 
+    /// 自分の適用に起因する動きが落ち着くまでの猶予。
+    ///
+    /// ウィンドウを動かすと AX の移動・リサイズ通知が飛ぶ。これを外部からの変更と
+    /// 誤認すると、自分の適用に反応して適用し直す無限ループになる。
+    private static let settleWindow: TimeInterval = 0.25
+
+    /// 自分の適用による動きの最中か。
+    public func isSettling(_ id: CGWindowID) -> Bool {
+        if coalescer.isActive(id) { return true }
+        guard let time = settledAt[id] else { return false }
+        return Date().timeIntervalSince(time) < Self.settleWindow
+    }
+
+    /// 目標を投げ直す。適用履歴を捨てるので、同じ矩形でも再発行される。
+    public func reapply(_ id: CGWindowID, _ target: TargetFrame) {
+        coalescer.invalidate(id)
+        coalescer.submit(id, target)
+        kick()
+    }
+
     private func finish(_ id: CGWindowID, target: TargetFrame, result: AXBridge.FrameApplyResult) {
         coalescer.complete(id)
+        settledAt[id] = Date()
         resolver?.didApply(
             id, target: target.rect, observed: result.observed, succeeded: result.succeeded)
 
