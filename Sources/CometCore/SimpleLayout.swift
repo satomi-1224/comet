@@ -72,15 +72,28 @@ public enum SimpleLayout {
             // このウィンドウの最小寸法と、残りのウィンドウが必要とする最小寸法。
             // 残り領域は次に別軸で分割されるので、この軸方向には残り全員が
             // 領域いっぱいを使う。したがって残り側の要求は最大値を取る。
-            let firstMinimum = extent(minimum(minimums, at: index), along: orientation)
-            let restMinimum = (index + 1..<count)
+            let placedMinimum = extent(minimum(minimums, at: index), along: orientation)
+            let remainingMinimum = (index + 1..<count)
                 .map { extent(minimum(minimums, at: $0), along: orientation) }
                 .max() ?? 0
 
-            let (first, rest) = split(
+            // 渦を描くには、分割の向きだけでなく「新しいウィンドウがどちら側を取るか」も
+            // 反転させる必要がある。常に手前側を取ると残り領域が一方向へ寄っていき、
+            // 渦ではなく隅へ向かう階段になる。
+            //
+            //   index 0: 左を取る → 残りは右
+            //   index 1: 上を取る → 残りは下
+            //   index 2: 右を取る → 残りは左
+            //   index 3: 下を取る → 残りは上   （以降くり返し）
+            //
+            // これで残り領域が 右→下→左→上 と時計回りに巻き込んでいく。
+            let takesLeadingSide = (index / 2) % 2 == 0
+
+            let (placed, rest) = split(
                 remaining, orientation: orientation, gaps: gaps, scale: scale, ratio: ratio,
-                firstMinimum: firstMinimum, restMinimum: restMinimum)
-            rects.append(first)
+                placedTakesLeadingSide: takesLeadingSide,
+                placedMinimum: placedMinimum, remainingMinimum: remainingMinimum)
+            rects.append(placed)
             remaining = rest
             orientation = orientation.flipped
         }
@@ -95,69 +108,74 @@ public enum SimpleLayout {
         index >= 0 && index < minimums.count ? minimums[index] : .zero
     }
 
-    /// 領域を2つに割る。手前側が `ratio`、残りが元の終端まで。
+    /// 領域を2つに割り、置くほうと残るほうを返す。
+    ///
+    /// `placedTakesLeadingSide` が `true` なら置くほうが手前側（左/上）、
+    /// `false` なら奥側（右/下）を取る。どちらの場合も間隔はギャップと厳密に一致し、
+    /// 元の領域の両端は保たれる。
     private static func split(
         _ rect: CGRect,
         orientation: Orientation,
         gaps: Gaps,
         scale: CGFloat,
         ratio: CGFloat,
-        firstMinimum: CGFloat,
-        restMinimum: CGFloat
-    ) -> (first: CGRect, rest: CGRect) {
+        placedTakesLeadingSide: Bool,
+        placedMinimum: CGFloat,
+        remainingMinimum: CGFloat
+    ) -> (placed: CGRect, remaining: CGRect) {
         let gap = orientation == .horizontal ? gaps.innerHorizontal : gaps.innerVertical
         let start = orientation == .horizontal ? rect.minX : rect.minY
         let end = orientation == .horizontal ? rect.maxX : rect.maxY
         let available = max(0, (end - start) - gap)
 
-        let length = firstLength(
+        let placedLength = leadingLength(
             available: available, ratio: ratio,
-            firstMinimum: firstMinimum, restMinimum: restMinimum)
+            leadingMinimum: placedMinimum, trailingMinimum: remainingMinimum)
 
-        let boundary = Geometry.rounded(start + length, scale: scale)
-        let restStart = min(Geometry.rounded(boundary + gap, scale: scale), end)
+        // 手前側の長さから境界を決める。置くほうが奥側なら、残るほうの長さで境界を決める。
+        let leadingLengthValue = placedTakesLeadingSide ? placedLength : available - placedLength
+        let boundary = Geometry.rounded(start + leadingLengthValue, scale: scale)
+        let trailingStart = min(Geometry.rounded(boundary + gap, scale: scale), end)
 
+        let leading = slice(rect, orientation: orientation, from: start, to: boundary)
+        let trailing = slice(rect, orientation: orientation, from: trailingStart, to: end)
+
+        return placedTakesLeadingSide ? (leading, trailing) : (trailing, leading)
+    }
+
+    /// 分割軸に沿って `from`〜`to` を切り出す。もう一方の軸は元のまま。
+    private static func slice(
+        _ rect: CGRect, orientation: Orientation, from: CGFloat, to: CGFloat
+    ) -> CGRect {
         switch orientation {
         case .horizontal:
-            return (
-                CGRect(
-                    x: rect.minX, y: rect.minY,
-                    width: max(0, boundary - rect.minX), height: rect.height),
-                CGRect(
-                    x: restStart, y: rect.minY,
-                    width: max(0, rect.maxX - restStart), height: rect.height)
-            )
+            return CGRect(
+                x: from, y: rect.minY, width: max(0, to - from), height: rect.height)
         case .vertical:
-            return (
-                CGRect(
-                    x: rect.minX, y: rect.minY,
-                    width: rect.width, height: max(0, boundary - rect.minY)),
-                CGRect(
-                    x: rect.minX, y: restStart,
-                    width: rect.width, height: max(0, rect.maxY - restStart))
-            )
+            return CGRect(
+                x: rect.minX, y: from, width: rect.width, height: max(0, to - from))
         }
     }
 
-    /// 手前側に割り当てる長さ。最小寸法を尊重する。
+    /// 置くほうに割り当てる長さ。最小寸法を尊重する。
     ///
     /// 両者の最小を同時に満たせない場合は、最小寸法に比例して不足を分け合う。
     /// どちらか一方だけを満たすと、割を食った側が一方的にはみ出して重なるため。
-    private static func firstLength(
+    private static func leadingLength(
         available: CGFloat,
         ratio: CGFloat,
-        firstMinimum: CGFloat,
-        restMinimum: CGFloat
+        leadingMinimum: CGFloat,
+        trailingMinimum: CGFloat
     ) -> CGFloat {
         let desired = available * ratio
-        let lowerBound = min(firstMinimum, available)
-        let upperBound = available - restMinimum
+        let lowerBound = min(leadingMinimum, available)
+        let upperBound = available - trailingMinimum
 
         guard lowerBound <= upperBound else {
             // 双方の最小を満たせない。比例配分で不足を分け合う。
-            let total = firstMinimum + restMinimum
+            let total = leadingMinimum + trailingMinimum
             guard total > 0 else { return desired }
-            return available * (firstMinimum / total)
+            return available * (leadingMinimum / total)
         }
         return min(max(desired, lowerBound), upperBound)
     }

@@ -5,6 +5,7 @@ public enum LaunchOptionsError: Error, Equatable, CustomStringConvertible {
     case unexpectedArgument(String)
     case missingValue(flag: String)
     case invalidLogLevel(String)
+    case invalidWindowCount(String)
 
     public var description: String {
         switch self {
@@ -14,6 +15,8 @@ public enum LaunchOptionsError: Error, Equatable, CustomStringConvertible {
             "予期しない引数: \(arg)"
         case .missingValue(let flag):
             "\(flag) に値が指定されていない"
+        case .invalidWindowCount(let value):
+            "ウィンドウ枚数は 1 以上の整数を指定する: \(value)"
         case .invalidLogLevel(let value):
             "不正なログレベル: \(value)（有効な値: "
                 + LogLevel.allCases.map(\.name).joined(separator: ", ") + "）"
@@ -34,6 +37,8 @@ public struct LaunchOptions: Equatable, Sendable {
     /// レイアウトを計算するがウィンドウは動かさない。
     /// 他のウィンドウマネージャが動いている環境で検証するために使う。
     public var dryRun: Bool = false
+    /// 指定枚数のレイアウトを図示して終了する。ウィンドウには一切触れない。
+    public var previewLayout: Int?
 
     public init() {}
 
@@ -50,6 +55,8 @@ public struct LaunchOptions: Equatable, Sendable {
                                 例: --hotkey alt-h --hotkey cmd-shift-space
           --dry-run             レイアウトを計算するがウィンドウは動かさない。
                                 他のウィンドウマネージャが動いている環境での検証用。
+          --preview-layout <n>  n 枚のときのレイアウトを図示して終了する。
+                                ウィンドウには一切触れない。
           --print-keys          指定できるキー名を一覧表示して終了する
           --help, -h            このヘルプを表示して終了する
 
@@ -87,6 +94,11 @@ public struct LaunchOptions: Equatable, Sendable {
                     options.logLevel = level
                 case "--hotkey":
                     options.hotkeys.append(value)
+                case "--preview-layout":
+                    guard let count = Int(value), count > 0 else {
+                        throw LaunchOptionsError.invalidWindowCount(value)
+                    }
+                    options.previewLayout = count
                 default:
                     throw LaunchOptionsError.unknownFlag(flag)
                 }
@@ -116,6 +128,13 @@ public struct LaunchOptions: Equatable, Sendable {
 
             case "--hotkey":
                 options.hotkeys.append(try takeValue(args, after: &index, flag: arg))
+
+            case "--preview-layout":
+                let value = try takeValue(args, after: &index, flag: arg)
+                guard let count = Int(value), count > 0 else {
+                    throw LaunchOptionsError.invalidWindowCount(value)
+                }
+                options.previewLayout = count
 
             default:
                 if arg.hasPrefix("-") {

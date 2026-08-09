@@ -103,15 +103,54 @@ struct SimpleLayoutTests {
 
         let left = rects[0]
         let topRight = rects[1]
-        let bottomLeft = rects[2]
-        let bottomRight = rects[3]
+        let third = rects[2]
+        let fourth = rects[3]
 
         #expect(left.height == screen.height, "左は全高")
-        #expect(topRight.width == bottomLeft.width + bottomRight.width, "下段が上段の幅を分け合う")
-        #expect(bottomLeft.minY == bottomRight.minY, "最後の2枚は上端が揃う")
-        #expect(bottomLeft.height == bottomRight.height, "最後の2枚は高さが揃う")
-        #expect(bottomLeft.maxX <= bottomRight.minX, "最後の2枚は横並び")
-        #expect(bottomLeft.minY >= topRight.maxY, "上段より下にある")
+        #expect(topRight.width == third.width + fourth.width, "下段が上段の幅を分け合う")
+        #expect(third.minY == fourth.minY, "最後の2枚は上端が揃う")
+        #expect(third.height == fourth.height, "最後の2枚は高さが揃う")
+        #expect(third.minY >= topRight.maxY, "上段より下にある")
+        // 渦なので3枚目が奥（右）、最後が手前（左）に入る
+        #expect(fourth.maxX <= third.minX, "4枚目は3枚目の左")
+    }
+
+    // 渦の本質は、分割の向きだけでなく「どちら側を取るか」も反転すること。
+    // 常に手前側を取ると残り領域が一方向へ寄っていき、隅へ向かう階段になってしまう。
+    //
+    //   ┌─────┬─────┐   A 左 → B 右上 → C 右下の右 → D その下 → E その上
+    //   │     │  B  │   残り領域が 右→下→左→上 と時計回りに巻き込む
+    //   │  A  ├──┬──┤
+    //   │     │E │  │
+    //   │     ├──┤C │
+    //   │     │D │  │
+    //   └─────┴──┴──┘
+    @Test("5枚で残り領域が時計回りに巻き込む")
+    func fiveWindowsSpiralInward() {
+        let rects = spiral(5)
+        #expect(rects.count == 5)
+
+        let a = rects[0], b = rects[1], c = rects[2], d = rects[3], e = rects[4]
+
+        #expect(a.height == screen.height, "A は全高")
+        #expect(b.minX >= a.maxX, "B は A の右")
+        #expect(c.minY >= b.maxY, "C は B の下")
+        #expect(c.minX >= d.maxX, "C は D の右（3枚目が奥側を取る）")
+        #expect(d.minY >= e.maxY, "D は E の下（4枚目が奥側を取る）")
+        #expect(d.minX == e.minX, "D と E は左端が揃う")
+        #expect(d.width == e.width, "D と E は幅が揃う")
+    }
+
+    // 階段になっていないことの直接的な検査。
+    // 隅へ向かう階段だと、後半のウィンドウは常に右下へ寄り続ける。
+    @Test("後半のウィンドウが一方向へ寄り続けない")
+    func doesNotDegenerateIntoStaircase() {
+        let rects = spiral(6)
+        // 渦なら、あるところで「前より左」または「前より上」に戻る瞬間がある
+        let movesBack = zip(rects, rects.dropFirst()).contains { previous, next in
+            next.minX < previous.minX || next.minY < previous.minY
+        }
+        #expect(movesBack, "常に右下へ進むだけなら渦ではない")
     }
 
     // 縦長の領域では最初の分割が上下になる。
@@ -159,8 +198,9 @@ struct SimpleLayoutTests {
         #expect(rects[1].minX - rects[0].maxX == gaps.innerHorizontal)
         // 右上と右下のあいだ（垂直方向の分割）
         #expect(rects[2].minY - rects[1].maxY == gaps.innerVertical)
-        // 右下の2枚のあいだ（水平方向の分割）
-        #expect(rects[3].minX - rects[2].maxX == gaps.innerHorizontal)
+        // 右下の2枚のあいだ（水平方向の分割）。
+        // 渦なので3枚目が右、4枚目が左に入る。
+        #expect(rects[2].minX - rects[3].maxX == gaps.innerHorizontal)
     }
 
     @Test("全ての矩形は 0.5pt 格子に載る", arguments: 1...8)

@@ -87,6 +87,23 @@ struct LaunchOptionsTests {
         #expect(try LaunchOptions.parse(["--dry-run"]).dryRun)
     }
 
+    @Test("--preview-layout は枚数を取る")
+    func previewLayoutFlag() throws {
+        #expect(try LaunchOptions.parse([]).previewLayout == nil)
+        #expect(try LaunchOptions.parse(["--preview-layout", "5"]).previewLayout == 5)
+        #expect(try LaunchOptions.parse(["--preview-layout=3"]).previewLayout == 3)
+    }
+
+    @Test("--preview-layout に 1 未満や非数値はエラー")
+    func previewLayoutRejectsInvalidCounts() {
+        #expect(throws: LaunchOptionsError.invalidWindowCount("0")) {
+            try LaunchOptions.parse(["--preview-layout", "0"])
+        }
+        #expect(throws: LaunchOptionsError.invalidWindowCount("abc")) {
+            try LaunchOptions.parse(["--preview-layout", "abc"])
+        }
+    }
+
     @Test("未知のフラグはエラー")
     func unknownFlag() {
         #expect(throws: LaunchOptionsError.unknownFlag("--turbo")) {

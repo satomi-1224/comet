@@ -68,6 +68,13 @@ if options.printKeys {
     exit(0)
 }
 
+if let count = options.previewLayout {
+    let area = LayoutPreview.primaryVisibleFrame()
+    print("領域 (\(Int(area.minX)), \(Int(area.minY))) \(Int(area.width))x\(Int(area.height))  ウィンドウ \(count) 枚\n")
+    print(LayoutPreview.render(count: count, area: area, gaps: Gaps(inner: 5, outer: 5)))
+    exit(0)
+}
+
 // MARK: - ログ
 
 let log = Log.shared
