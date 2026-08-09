@@ -26,6 +26,45 @@ public enum SimpleLayout {
         }
     }
 
+    /// 残り領域の進み方。
+    public enum Style: Sendable {
+        /// 新しいウィンドウが常に手前側（左／上）を取り、残り領域が右下へ降りていく。
+        ///
+        /// ```
+        /// 4枚            5枚
+        /// ┌───┬───────┐  ┌───┬───────┐
+        /// │   │   B   │  │   │   B   │
+        /// │ A ├───┬───┤  │ A ├───┬───┤
+        /// │   │ C │ D │  │   │ C │ D │
+        /// └───┴───┴───┘  │   │   ├───┤
+        ///                │   │   │ E │
+        ///                └───┴───┴───┘
+        /// ```
+        case dwindle
+
+        /// 取る側も2回ごとに反転し、残り領域が 右→下→左→上 と時計回りに巻き込む。
+        ///
+        /// ```
+        /// 4枚            5枚
+        /// ┌───┬───────┐  ┌───┬───────┐
+        /// │   │   B   │  │   │   B   │
+        /// │ A ├───┬───┤  │ A ├───┬───┤
+        /// │   │ D │ C │  │   │ E │   │
+        /// └───┴───┴───┘  │   ├───┤ C │
+        ///                │   │ D │   │
+        ///                └───┴───┴───┘
+        /// ```
+        case spiral
+
+        /// 分割 `index` 回目で、新しいウィンドウが手前側（左／上）を取るか。
+        func takesLeadingSide(at index: Int) -> Bool {
+            switch self {
+            case .dwindle: true
+            case .spiral: (index / 2) % 2 == 0
+            }
+        }
+    }
+
     /// 領域を spiral 状に `count` 分割する。座標は AX 系。
     ///
     /// 最初の分割方向は領域の縦横比で決める（横長なら左右から）。
@@ -47,7 +86,8 @@ public enum SimpleLayout {
         gaps: Gaps,
         scale: CGFloat = 2,
         ratio: CGFloat = 0.5,
-        minimums: [CGSize] = []
+        minimums: [CGSize] = [],
+        style: Style = .dwindle
     ) -> [CGRect] {
         guard count > 0 else { return [] }
 
@@ -77,17 +117,9 @@ public enum SimpleLayout {
                 .map { extent(minimum(minimums, at: $0), along: orientation) }
                 .max() ?? 0
 
-            // 渦を描くには、分割の向きだけでなく「新しいウィンドウがどちら側を取るか」も
-            // 反転させる必要がある。常に手前側を取ると残り領域が一方向へ寄っていき、
-            // 渦ではなく隅へ向かう階段になる。
-            //
-            //   index 0: 左を取る → 残りは右
-            //   index 1: 上を取る → 残りは下
-            //   index 2: 右を取る → 残りは左
-            //   index 3: 下を取る → 残りは上   （以降くり返し）
-            //
-            // これで残り領域が 右→下→左→上 と時計回りに巻き込んでいく。
-            let takesLeadingSide = (index / 2) % 2 == 0
+            // 分割の向きに加えて「新しいウィンドウがどちら側を取るか」で
+            // 残り領域の進み方が決まる（``Style`` 参照）。
+            let takesLeadingSide = style.takesLeadingSide(at: index)
 
             let (placed, rest) = split(
                 remaining, orientation: orientation, gaps: gaps, scale: scale, ratio: ratio,

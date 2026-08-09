@@ -95,7 +95,7 @@ struct SimpleLayoutTests {
         #expect(topRight.minX >= left.maxX, "左より右にある")
     }
 
-    // 4枚目は3枚目の領域を左右に割る。分割方向が交互に切り替わるのが spiral。
+    // 既定は dwindle。新しいウィンドウは常に手前側を取り、残り領域が右下へ降りていく。
     @Test("4枚なら最後の2枚が横並びになる")
     func fourWindowsEndSideBySide() {
         let rects = spiral(4)
@@ -111,12 +111,22 @@ struct SimpleLayoutTests {
         #expect(third.minY == fourth.minY, "最後の2枚は上端が揃う")
         #expect(third.height == fourth.height, "最後の2枚は高さが揃う")
         #expect(third.minY >= topRight.maxY, "上段より下にある")
-        // 渦なので3枚目が奥（右）、最後が手前（左）に入る
-        #expect(fourth.maxX <= third.minX, "4枚目は3枚目の左")
+        #expect(third.maxX <= fourth.minX, "3枚目が左、4枚目が右")
     }
 
-    // 渦の本質は、分割の向きだけでなく「どちら側を取るか」も反転すること。
-    // 常に手前側を取ると残り領域が一方向へ寄っていき、隅へ向かう階段になってしまう。
+    // dwindle では新しいウィンドウが常に手前側を取るので、
+    // 残り領域（＝最後のウィンドウが入る場所）は右下へ降りていく。
+    @Test("dwindle では残り領域が右下へ降りていく")
+    func dwindleMarchesTowardBottomRight() {
+        let rects = SimpleLayout.spiral(count: 6, in: screen, gaps: .zero, style: .dwindle)
+        for (previous, next) in zip(rects, rects.dropFirst()) {
+            #expect(
+                next.minX >= previous.minX && next.minY >= previous.minY,
+                "左や上へ戻らない: \(previous) → \(next)")
+        }
+    }
+
+    // 渦にするには、分割の向きだけでなく「どちら側を取るか」も反転させる必要がある。
     //
     //   ┌─────┬─────┐   A 左 → B 右上 → C 右下の右 → D その下 → E その上
     //   │     │  B  │   残り領域が 右→下→左→上 と時計回りに巻き込む
@@ -125,9 +135,9 @@ struct SimpleLayoutTests {
     //   │     ├──┤C │
     //   │     │D │  │
     //   └─────┴──┴──┘
-    @Test("5枚で残り領域が時計回りに巻き込む")
-    func fiveWindowsSpiralInward() {
-        let rects = spiral(5)
+    @Test("spiral では残り領域が時計回りに巻き込む")
+    func spiralWindsInward() {
+        let rects = SimpleLayout.spiral(count: 5, in: screen, gaps: .zero, style: .spiral)
         #expect(rects.count == 5)
 
         let a = rects[0], b = rects[1], c = rects[2], d = rects[3], e = rects[4]
@@ -141,16 +151,25 @@ struct SimpleLayoutTests {
         #expect(d.width == e.width, "D と E は幅が揃う")
     }
 
-    // 階段になっていないことの直接的な検査。
-    // 隅へ向かう階段だと、後半のウィンドウは常に右下へ寄り続ける。
-    @Test("後半のウィンドウが一方向へ寄り続けない")
-    func doesNotDegenerateIntoStaircase() {
-        let rects = spiral(6)
-        // 渦なら、あるところで「前より左」または「前より上」に戻る瞬間がある
+    @Test("spiral は一方向へ寄り続けない")
+    func spiralDoesNotDegenerateIntoStaircase() {
+        let rects = SimpleLayout.spiral(count: 6, in: screen, gaps: .zero, style: .spiral)
         let movesBack = zip(rects, rects.dropFirst()).contains { previous, next in
             next.minX < previous.minX || next.minY < previous.minY
         }
         #expect(movesBack, "常に右下へ進むだけなら渦ではない")
+    }
+
+    @Test("どちらの style でも重なりは出ない", arguments: [SimpleLayout.Style.dwindle, .spiral])
+    func bothStylesAvoidOverlap(style: SimpleLayout.Style) {
+        let rects = SimpleLayout.spiral(
+            count: 7, in: screen, gaps: Gaps(inner: 5, outer: 5), style: style)
+        for i in 0..<rects.count {
+            for j in (i + 1)..<rects.count {
+                let overlap = rects[i].intersection(rects[j])
+                #expect(overlap.isNull || overlap.width == 0 || overlap.height == 0)
+            }
+        }
     }
 
     // 縦長の領域では最初の分割が上下になる。
@@ -198,9 +217,8 @@ struct SimpleLayoutTests {
         #expect(rects[1].minX - rects[0].maxX == gaps.innerHorizontal)
         // 右上と右下のあいだ（垂直方向の分割）
         #expect(rects[2].minY - rects[1].maxY == gaps.innerVertical)
-        // 右下の2枚のあいだ（水平方向の分割）。
-        // 渦なので3枚目が右、4枚目が左に入る。
-        #expect(rects[2].minX - rects[3].maxX == gaps.innerHorizontal)
+        // 右下の2枚のあいだ（水平方向の分割）
+        #expect(rects[3].minX - rects[2].maxX == gaps.innerHorizontal)
     }
 
     @Test("全ての矩形は 0.5pt 格子に載る", arguments: 1...8)
