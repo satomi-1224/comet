@@ -11,9 +11,16 @@ public struct TargetFrame: Equatable, Sendable {
     /// 位置だけを設定して IPC を半減できる。
     public var setSize: Bool
 
-    public init(rect: CGRect, setSize: Bool = true) {
+    /// 適用後に読み戻して結果を確かめるか。
+    ///
+    /// ドラッグ追従中は1フレームあたりの往復を削りたいので省略する。
+    /// 正確さはドラッグが終わったあとの仕上げの適用で担保する。
+    public var verify: Bool
+
+    public init(rect: CGRect, setSize: Bool = true, verify: Bool = true) {
         self.rect = rect
         self.setSize = setSize
+        self.verify = verify
     }
 }
 
@@ -165,6 +172,7 @@ public struct FrameCoalescer {
 
     private func isUnchanged(from previous: TargetFrame, to target: TargetFrame) -> Bool {
         previous.setSize == target.setSize
+            && previous.verify == target.verify
             && Geometry.isApproximatelyEqual(previous.rect, target.rect, tolerance: tolerance)
     }
 }

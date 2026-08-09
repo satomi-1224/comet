@@ -125,7 +125,8 @@ public final class FrameScheduler {
 
         applierPool.queue(for: pid).async {
             let result = AXBridge.applyFrame(
-                target.rect, setSize: target.setSize, current: current, to: element.raw)
+                target.rect, setSize: target.setSize, verify: target.verify,
+                current: current, to: element.raw)
             Task { @MainActor in
                 self.finish(id, target: target, result: result)
             }

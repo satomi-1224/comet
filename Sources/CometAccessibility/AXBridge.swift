@@ -141,6 +141,7 @@ public enum AXBridge {
     public static func applyFrame(
         _ target: CGRect,
         setSize: Bool,
+        verify: Bool = true,
         current: CGRect?,
         to element: AXUIElement
     ) -> FrameApplyResult {
@@ -153,7 +154,9 @@ public enum AXBridge {
 
         // 設定が成功しても、アプリの最小サイズや画面端の制約で実際の矩形は違いうる。
         // 目標どおりに並んでいるかを保証するには読み戻すしかない（1往復）。
-        return FrameApplyResult(succeeded: moved && sized, observed: Self.readFrame(element))
+        // ドラッグ追従中は往復を削るために省略する。
+        let observed = verify ? Self.readFrame(element) : nil
+        return FrameApplyResult(succeeded: moved && sized, observed: observed)
     }
 
     /// 適用の結果。

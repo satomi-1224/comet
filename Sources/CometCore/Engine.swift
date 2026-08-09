@@ -356,17 +356,29 @@ public final class Engine: WindowResolving {
         guard let id = idsByElement[element],
             desiredFrames[id] != nil,
             registry[id]?.disposition.isTiled == true,
-            !scheduler.isSettling(id),
-            allowExternalReaction(id)
+            !scheduler.isSettling(id)
         else { return }
 
+        // 頻度制限はアプリとの押し合いを止めるためのもの。ドラッグ中に効かせると
+        // 上限に達した時点で追従が止まり、カクついて見える。
+        guard isUserDragging() || allowExternalReaction(id) else { return }
+
+        // 素早いドラッグでは通知が連続して届く。読み取りが飛んでいる間に
+        // さらに読み取りを積むと往復が増えるだけなので、1件に絞る。
+        guard pendingExternalReads.insert(id).inserted else { return }
+
         applierPool.queue(for: pid).async {
-            guard let observed = AXBridge.readFrame(element.raw) else { return }
+            let observed = AXBridge.readFrame(element.raw)
             Task { @MainActor in
+                self.pendingExternalReads.remove(id)
+                guard let observed else { return }
                 self.reconcileExternalChange(id, observed: observed)
             }
         }
     }
+
+    /// 読み取りを発行済みのウィンドウ。重複した読み取りを避ける。
+    private var pendingExternalReads: Set<CGWindowID> = []
 
     /// 外部からの変更を「リサイズ」か「移動」かに分けて処理する。
     ///
@@ -378,8 +390,30 @@ public final class Engine: WindowResolving {
         guard let desired = desiredFrames[id] else { return }
 
         let tolerance: CGFloat = 2
+
+        // 前回観測した矩形から変わっていないなら、アプリ側の制約で目標とずれたまま
+        // 安定している状態。ここで反応すると、そのズレを「利用者のリサイズ」と
+        // 誤認して比率を更新し、再配置してまたズレる、という往復が止まらなくなる。
+        //
+        // 実例: WezTerm は文字セル単位でしかリサイズできないため目標にぴったり
+        // 収まらない。これに反応し続けると比率が際限なく動いてレイアウトが壊れる。
+        let previous = registry[id]?.observedFrame
+        registry.update(id) { $0.observedFrame = observed }
+        if let previous, Geometry.isApproximatelyEqual(observed, previous, tolerance: tolerance) {
+            return
+        }
+
         let edges = changedEdges(desired: desired, observed: observed, tolerance: tolerance)
         guard !edges.isEmpty else { return }
+
+        // アプリが自分の都合で寸法を変えた場合（文字セル単位への丸め、最小サイズなど）を
+        // 「利用者のリサイズ」と解釈すると、比率を更新 → 再配置 → またずれる、の
+        // 往復が止まらなくなる。ドラッグ中かどうかで両者を分ける。
+        guard isUserDragging() else {
+            log.debug("[\(id)] がアプリ都合で変化した。レイアウトへ戻す")
+            scheduler.reapply(id, TargetFrame(rect: desired))
+            return
+        }
 
         let matches = edges.map { matchSplit($0, tolerance: tolerance) }
 
@@ -395,9 +429,67 @@ public final class Engine: WindowResolving {
             }
             setSplitRatio(match.index, min(max(ratio, 0.05), 0.95))
         }
-        log.debug("[\(id)] のリサイズを分割の比率へ反映した")
+
+        // ドラッグ中の当人には手を出さない。利用者が動かしている最中に
+        // こちらからも位置を設定すると引っ張り合いになり、カクついて見える。
+        // 追従させるのは隣だけにして、離した後に一度だけ全体を整える。
+        draggingWindow = (id: id, at: Date())
+        log.trace("[\(id)] のリサイズを分割の比率へ反映")
         relayout()
+        scheduleDragSettle()
     }
+
+    /// ドラッグが終わった頃に一度だけ全体を整える。
+    ///
+    /// ドラッグ中は当人を対象外にしているので、離した時点で本人が
+    /// レイアウトに吸い付くようにする。
+    private func scheduleDragSettle() {
+        guard !isDragSettleScheduled else { return }
+        isDragSettleScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.dragGrace + 0.1) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.isDragSettleScheduled = false
+                guard self.currentDraggingWindow() == nil else {
+                    // まだドラッグ中。もう一度待つ。
+                    self.scheduleDragSettle()
+                    return
+                }
+                self.draggingWindow = nil
+                self.relayout()
+            }
+        }
+    }
+
+    /// ドラッグ中とみなすウィンドウ。猶予を過ぎたら nil。
+    private func currentDraggingWindow() -> CGWindowID? {
+        guard let dragging = draggingWindow else { return nil }
+        guard Date().timeIntervalSince(dragging.at) < Self.dragGrace else { return nil }
+        return dragging.id
+    }
+
+    /// 利用者がマウスでドラッグしている最中か。
+    ///
+    /// ウィンドウの縁をドラッグするリサイズは必ず左ボタンを押した状態で起きる。
+    /// アプリが自分で寸法を変える場合はボタンが押されていない。
+    /// これが「利用者の操作」と「アプリ都合の変化」を分ける最も確かな手がかり。
+    ///
+    /// 通知はドラッグ終了の直後に届くこともあるので、離してから少しの間は
+    /// ドラッグ中として扱う。
+    private func isUserDragging() -> Bool {
+        if CGEventSource.buttonState(.combinedSessionState, button: .left) {
+            lastMouseDownAt = Date()
+            return true
+        }
+        guard let last = lastMouseDownAt else { return false }
+        return Date().timeIntervalSince(last) < Self.dragGrace
+    }
+
+    private static let dragGrace: TimeInterval = 0.5
+    private var lastMouseDownAt: Date?
+    /// ドラッグ中のウィンドウ。この間は当人への適用を見送る。
+    private var draggingWindow: (id: CGWindowID, at: Date)?
+    private var isDragSettleScheduled = false
 
     private struct EdgeChange {
         let orientation: SimpleLayout.Orientation
@@ -532,6 +624,7 @@ public final class Engine: WindowResolving {
         // 寸法 0 を送りつけてもアプリは最小サイズに戻すだけで、結果は重なりになる。
         // 送らずに現状維持とし、状況をログに残す。
         let minimumSide: CGFloat = 1
+        let dragging = currentDraggingWindow()
         var targets: [CGWindowID: TargetFrame] = [:]
         var order: [CGWindowID] = []
         var degenerate = 0
@@ -540,10 +633,17 @@ public final class Engine: WindowResolving {
                 degenerate += 1
                 continue
             }
-            targets[id] = TargetFrame(rect: rect)
-            order.append(id)
             // 外部から動かされたときの戻し先として覚えておく。
             desiredFrames[id] = rect
+
+            // ドラッグ中の当人には手を出さない。利用者が動かしている最中に
+            // こちらからも設定すると引っ張り合いになり、カクついて見える。
+            guard id != dragging else { continue }
+
+            // ドラッグ追従中は読み戻しを省いて往復を減らす。素早く動かしても
+            // 隣が置いていかれないことを優先し、正確さは仕上げの適用で担保する。
+            targets[id] = TargetFrame(rect: rect, verify: dragging == nil)
+            order.append(id)
         }
         if degenerate > 0 {
             log.warn("領域が足りず \(degenerate) 枚を配置できなかった（ウィンドウ \(tiled.count) 枚）")

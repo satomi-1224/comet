@@ -160,6 +160,21 @@ struct FrameCoalescerTests {
         #expect(requests[0].target.setSize)
     }
 
+    // ドラッグ追従中は読み戻しを省く。省くかどうかが変わったら別の要求として
+    // 扱わないと、ドラッグ終了後の「仕上げの適用」が発行されない。
+    @Test("矩形が同じでも verify が変われば発行する")
+    func verifyChangeIsIssued() {
+        var coalescer = FrameCoalescer()
+        coalescer.submit(1, TargetFrame(rect: rect(100), verify: false))
+        _ = coalescer.drain()
+        coalescer.complete(1)
+
+        coalescer.submit(1, TargetFrame(rect: rect(100), verify: true))
+        let requests = coalescer.drain()
+        #expect(requests.count == 1)
+        #expect(requests[0].target.verify)
+    }
+
     // MARK: - 順序
 
     @Test("drain の順序は submit の順序を保つ")
