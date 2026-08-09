@@ -79,6 +79,37 @@ public enum SimpleLayout {
     ///   - minimums: ウィンドウごとの最小寸法（登録順）。不明な要素は `.zero`。
     ///     アプリが指定より小さくならない場合、そのぶん兄弟が譲らないと
     ///     はみ出して重なる。学習した最小寸法を渡すと分割位置がそれを避ける。
+    /// ひとつの分割の記録。
+    ///
+    /// 利用者がウィンドウの縁をドラッグしたとき、動いた辺がどの分割の境界に
+    /// あたるかを突き止め、その分割の比率を更新するために使う。
+    public struct SplitRecord: Sendable, Equatable {
+        public let orientation: Orientation
+        /// 分割軸方向における領域の始端と終端。
+        public let start: CGFloat
+        public let end: CGFloat
+        /// 手前側の終端（＝境界）。奥側はここに間隔を足した位置から始まる。
+        public let boundary: CGFloat
+        public let gap: CGFloat
+
+        /// この分割で配分できる長さ（間隔を除いたもの）。
+        public var available: CGFloat { max(0, (end - start) - gap) }
+
+        /// 境界を `value` に置いたときの比率。
+        public func ratio(forBoundary value: CGFloat) -> CGFloat? {
+            guard available > 0 else { return nil }
+            return (value - start) / available
+        }
+    }
+
+    public struct Result: Sendable {
+        public let rects: [CGRect]
+        /// 分割の記録。要素数は `rects.count - 1`。
+        public let splits: [SplitRecord]
+
+        public static let empty = Result(rects: [], splits: [])
+    }
+
     /// - Returns: 配置できない場合（枚数が 0 以下、領域が潰れている）は空配列。
     public static func spiral(
         count: Int,
@@ -89,16 +120,34 @@ public enum SimpleLayout {
         minimums: [CGSize] = [],
         style: Style = .dwindle
     ) -> [CGRect] {
-        guard count > 0 else { return [] }
+        compute(
+            count: count, in: area, gaps: gaps, scale: scale,
+            ratios: [], defaultRatio: ratio, minimums: minimums, style: style
+        ).rects
+    }
+
+    /// 分割ごとの比率を指定して配置を求める。
+    ///
+    /// - Parameter ratios: 分割ごとの比率。足りない分は `defaultRatio` で補う。
+    public static func compute(
+        count: Int,
+        in area: CGRect,
+        gaps: Gaps,
+        scale: CGFloat = 2,
+        ratios: [CGFloat] = [],
+        defaultRatio: CGFloat = 0.5,
+        minimums: [CGSize] = [],
+        style: Style = .dwindle
+    ) -> Result {
+        guard count > 0 else { return .empty }
 
         let usable = Geometry.rounded(gaps.usableArea(in: area), scale: scale)
-        guard usable.width > 0, usable.height > 0 else { return [] }
-
-        // 範囲外の比率は分割の不変条件（手前側が領域内に収まる）を壊す。
-        let ratio = min(max(ratio, 0), 1)
+        guard usable.width > 0, usable.height > 0 else { return .empty }
 
         var rects: [CGRect] = []
+        var splits: [SplitRecord] = []
         rects.reserveCapacity(count)
+        splits.reserveCapacity(max(0, count - 1))
 
         var remaining = usable
         var orientation: Orientation = usable.width >= usable.height ? .horizontal : .vertical
@@ -109,6 +158,9 @@ public enum SimpleLayout {
                 rects.append(remaining)
                 break
             }
+
+            // 範囲外の比率は分割の不変条件（手前側が領域内に収まる）を壊す。
+            let ratio = min(max(index < ratios.count ? ratios[index] : defaultRatio, 0), 1)
             // このウィンドウの最小寸法と、残りのウィンドウが必要とする最小寸法。
             // 残り領域は次に別軸で分割されるので、この軸方向には残り全員が
             // 領域いっぱいを使う。したがって残り側の要求は最大値を取る。
@@ -121,15 +173,16 @@ public enum SimpleLayout {
             // 残り領域の進み方が決まる（``Style`` 参照）。
             let takesLeadingSide = style.takesLeadingSide(at: index)
 
-            let (placed, rest) = split(
+            let (placed, rest, record) = split(
                 remaining, orientation: orientation, gaps: gaps, scale: scale, ratio: ratio,
                 placedTakesLeadingSide: takesLeadingSide,
                 placedMinimum: placedMinimum, remainingMinimum: remainingMinimum)
             rects.append(placed)
+            splits.append(record)
             remaining = rest
             orientation = orientation.flipped
         }
-        return rects
+        return Result(rects: rects, splits: splits)
     }
 
     private static func extent(_ size: CGSize, along orientation: Orientation) -> CGFloat {
@@ -154,7 +207,7 @@ public enum SimpleLayout {
         placedTakesLeadingSide: Bool,
         placedMinimum: CGFloat,
         remainingMinimum: CGFloat
-    ) -> (placed: CGRect, remaining: CGRect) {
+    ) -> (placed: CGRect, remaining: CGRect, record: SplitRecord) {
         let gap = orientation == .horizontal ? gaps.innerHorizontal : gaps.innerVertical
         let start = orientation == .horizontal ? rect.minX : rect.minY
         let end = orientation == .horizontal ? rect.maxX : rect.maxY
@@ -171,8 +224,12 @@ public enum SimpleLayout {
 
         let leading = slice(rect, orientation: orientation, from: start, to: boundary)
         let trailing = slice(rect, orientation: orientation, from: trailingStart, to: end)
+        let record = SplitRecord(
+            orientation: orientation, start: start, end: end, boundary: boundary, gap: gap)
 
-        return placedTakesLeadingSide ? (leading, trailing) : (trailing, leading)
+        return placedTakesLeadingSide
+            ? (leading, trailing, record)
+            : (trailing, leading, record)
     }
 
     /// 分割軸に沿って `from`〜`to` を切り出す。もう一方の軸は元のまま。

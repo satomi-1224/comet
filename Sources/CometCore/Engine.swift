@@ -62,8 +62,13 @@ public final class Engine: WindowResolving {
 
     /// レイアウトが定めた矩形。外部から動かされたときの戻し先になる。
     private var desiredFrames: [CGWindowID: CGRect] = [:]
-    /// 復元の頻度制限用。
+    /// 外部変更への反応の頻度制限用。
     private var restoreAttempts: [CGWindowID: (since: Date, count: Int)] = [:]
+
+    /// 分割ごとの比率。利用者がウィンドウの縁をドラッグすると、その分割の比率が変わる。
+    private var splitRatios: [CGFloat] = []
+    /// 直近の配置で得た分割の記録。動いた辺がどの分割にあたるかの照合に使う。
+    private var lastSplits: [SimpleLayout.SplitRecord] = []
 
     public var gaps: Gaps
     /// レイアウトを計算するがウィンドウは動かさない。
@@ -299,8 +304,8 @@ public final class Engine: WindowResolving {
             // 最小化は一時的な除外理由なので、状態が変わったら評価し直す。
             refreshWindow(element, pid: pid)
 
-        case .windowMoved(_, let element), .windowResized(_, let element):
-            restoreIfDisturbed(element)
+        case .windowMoved(let pid, let element), .windowResized(let pid, let element):
+            handleExternalChange(element, pid: pid)
 
         case .focusedWindowChanged, .applicationActivated:
             // Phase 2 以降で使う。
@@ -341,31 +346,111 @@ public final class Engine: WindowResolving {
         }
     }
 
-    /// 外部から動かされたウィンドウを、レイアウトが定めた位置へ戻す。
+    /// 外部からウィンドウが動かされたときの入口。
     ///
-    /// レイアウトが唯一の正なので、手で動かしたりアプリが自分で動いたりしても
-    /// 元へ戻す。これが無いとレイアウトは簡単に崩れる。
-    ///
-    /// 自分の適用でも移動・リサイズ通知は飛ぶため、区別しないと
-    /// 自分の適用に反応して適用し直す無限ループになる。
-    /// ``FrameScheduler/isSettling(_:)`` で適用中と直後の猶予を除外する。
-    private func restoreIfDisturbed(_ element: AXElement) {
+    /// 通知は「動いた」ことしか伝えないので、実際の矩形を読んでから判断する。
+    /// 自分の適用でも通知は飛ぶため、区別しないと自分の適用に反応して
+    /// 適用し直す無限ループになる。``FrameScheduler/isSettling(_:)`` で
+    /// 適用中と直後の猶予を除外する。
+    private func handleExternalChange(_ element: AXElement, pid: pid_t) {
         guard let id = idsByElement[element],
-            let desired = desiredFrames[id],
-            registry[id]?.disposition.isTiled == true
+            desiredFrames[id] != nil,
+            registry[id]?.disposition.isTiled == true,
+            !scheduler.isSettling(id),
+            allowExternalReaction(id)
         else { return }
 
-        guard !scheduler.isSettling(id) else { return }
-
-        // 暴れるアプリと押し合いにならないよう、短時間に繰り返すなら諦める。
-        guard allowRestore(id) else { return }
-
-        log.debug("[\(id)] が外部から動かされた。レイアウトへ戻す")
-        scheduler.reapply(id, TargetFrame(rect: desired))
+        applierPool.queue(for: pid).async {
+            guard let observed = AXBridge.readFrame(element.raw) else { return }
+            Task { @MainActor in
+                self.reconcileExternalChange(id, observed: observed)
+            }
+        }
     }
 
-    /// 復元の頻度制限。自分で動き続けるアプリと無限に押し合わないための歯止め。
-    private func allowRestore(_ id: CGWindowID) -> Bool {
+    /// 外部からの変更を「リサイズ」か「移動」かに分けて処理する。
+    ///
+    /// - **リサイズ**（動いた辺がすべて分割の境界）
+    ///   → その分割の比率を更新する。隣が追従し、間隔は設定値どおりに保たれる。
+    /// - **移動**（領域の外周など、動かせない辺が動いている）
+    ///   → レイアウトが唯一の正なので元へ戻す。
+    private func reconcileExternalChange(_ id: CGWindowID, observed: CGRect) {
+        guard let desired = desiredFrames[id] else { return }
+
+        let tolerance: CGFloat = 2
+        let edges = changedEdges(desired: desired, observed: observed, tolerance: tolerance)
+        guard !edges.isEmpty else { return }
+
+        let matches = edges.map { matchSplit($0, tolerance: tolerance) }
+
+        guard !matches.contains(where: { $0 == nil }) else {
+            log.debug("[\(id)] が外部から動かされた。レイアウトへ戻す")
+            scheduler.reapply(id, TargetFrame(rect: desired))
+            return
+        }
+
+        for match in matches.compactMap({ $0 }) {
+            guard let ratio = lastSplits[match.index].ratio(forBoundary: match.boundary) else {
+                continue
+            }
+            setSplitRatio(match.index, min(max(ratio, 0.05), 0.95))
+        }
+        log.debug("[\(id)] のリサイズを分割の比率へ反映した")
+        relayout()
+    }
+
+    private struct EdgeChange {
+        let orientation: SimpleLayout.Orientation
+        let oldValue: CGFloat
+        let newValue: CGFloat
+    }
+
+    private func changedEdges(
+        desired: CGRect, observed: CGRect, tolerance: CGFloat
+    ) -> [EdgeChange] {
+        var result: [EdgeChange] = []
+        if abs(observed.minX - desired.minX) > tolerance {
+            result.append(.init(orientation: .horizontal, oldValue: desired.minX, newValue: observed.minX))
+        }
+        if abs(observed.maxX - desired.maxX) > tolerance {
+            result.append(.init(orientation: .horizontal, oldValue: desired.maxX, newValue: observed.maxX))
+        }
+        if abs(observed.minY - desired.minY) > tolerance {
+            result.append(.init(orientation: .vertical, oldValue: desired.minY, newValue: observed.minY))
+        }
+        if abs(observed.maxY - desired.maxY) > tolerance {
+            result.append(.init(orientation: .vertical, oldValue: desired.maxY, newValue: observed.maxY))
+        }
+        return result
+    }
+
+    /// 動いた辺がどの分割の境界にあたるかを探す。
+    ///
+    /// 手前側のウィンドウなら終端が境界そのもの、奥側のウィンドウなら
+    /// 始端が「境界 + 間隔」になる。
+    private func matchSplit(
+        _ edge: EdgeChange, tolerance: CGFloat
+    ) -> (index: Int, boundary: CGFloat)? {
+        for (index, split) in lastSplits.enumerated() where split.orientation == edge.orientation {
+            if abs(split.boundary - edge.oldValue) <= tolerance {
+                return (index, edge.newValue)
+            }
+            if abs(split.boundary + split.gap - edge.oldValue) <= tolerance {
+                return (index, edge.newValue - split.gap)
+            }
+        }
+        return nil
+    }
+
+    private func setSplitRatio(_ index: Int, _ ratio: CGFloat) {
+        while splitRatios.count <= index {
+            splitRatios.append(0.5)
+        }
+        splitRatios[index] = ratio
+    }
+
+    /// 外部変更への反応の頻度制限。自分で動き続けるアプリと無限に押し合わないための歯止め。
+    private func allowExternalReaction(_ id: CGWindowID) -> Bool {
         let now = Date()
         var record = restoreAttempts[id] ?? (since: now, count: 0)
 
@@ -432,9 +517,12 @@ public final class Engine: WindowResolving {
         let tiled = registry.tiledIDs
         guard !tiled.isEmpty else { return }
 
-        let rects = SimpleLayout.spiral(
+        let layout = SimpleLayout.compute(
             count: tiled.count, in: monitor.visibleFrame, gaps: gaps, scale: monitor.scale,
+            ratios: splitRatios,
             minimums: tiled.map { minimumSizes[$0] ?? .zero })
+        let rects = layout.rects
+        lastSplits = layout.splits
         guard rects.count == tiled.count else {
             log.warn("レイアウトを算出できなかった (ウィンドウ \(tiled.count) 枚, 領域 \(monitor.visibleFrame))")
             return

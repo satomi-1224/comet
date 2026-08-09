@@ -256,6 +256,58 @@ struct SimpleLayoutTests {
         #expect(spiral(count, gaps: Gaps(inner: 5, outer: 5)).count == count)
     }
 
+    // MARK: - 分割ごとの比率
+
+    // 利用者がウィンドウの縁をドラッグしたら、それは分割境界を動かしたということ。
+    // 比率を持たせておかないと「隣が追従して隙間は一定」が表現できない。
+    @Test("分割ごとに比率を指定できる")
+    func perSplitRatios() {
+        let result = SimpleLayout.compute(
+            count: 3, in: screen, gaps: .zero, ratios: [0.7, 0.25])
+        #expect(result.rects[0].width == 700, "1つ目の分割は 0.7")
+        #expect(result.rects[1].height == 150, "2つ目の分割は 0.25")
+        #expect(result.rects[2].height == 450, "残りが下に来る")
+    }
+
+    @Test("比率が足りなければ既定値で補う")
+    func missingRatiosFallBack() {
+        let withRatios = SimpleLayout.compute(count: 4, in: screen, gaps: .zero, ratios: [0.5])
+        let withoutRatios = SimpleLayout.compute(count: 4, in: screen, gaps: .zero)
+        #expect(withRatios.rects == withoutRatios.rects)
+    }
+
+    @Test("分割の記録は枚数-1個で、境界が矩形の縁と一致する")
+    func splitRecordsMatchRectEdges() {
+        let gaps = Gaps(inner: 5, outer: 5)
+        let result = SimpleLayout.compute(count: 4, in: screen, gaps: gaps)
+
+        #expect(result.splits.count == 3)
+        // 1つ目の分割の境界は、1枚目の右端
+        #expect(result.splits[0].boundary == result.rects[0].maxX)
+        // 2つ目は2枚目の下端
+        #expect(result.splits[1].boundary == result.rects[1].maxY)
+        // 3つ目は3枚目の右端
+        #expect(result.splits[2].boundary == result.rects[2].maxX)
+    }
+
+    // 動いた辺から比率を逆算できないと、リサイズを分割へ反映できない。
+    @Test("境界の位置から比率を逆算できる")
+    func ratioIsRecoverableFromBoundary() {
+        let result = SimpleLayout.compute(count: 2, in: screen, gaps: .zero, ratios: [0.5])
+        let split = result.splits[0]
+        #expect(split.ratio(forBoundary: split.boundary) == 0.5)
+        #expect(split.ratio(forBoundary: screen.minX + 700) == 0.7)
+    }
+
+    @Test("逆算した比率を渡すと同じ配置になる")
+    func recoveredRatioReproducesLayout() {
+        let original = SimpleLayout.compute(count: 3, in: screen, gaps: Gaps(inner: 5, outer: 5))
+        let recovered = original.splits.compactMap { $0.ratio(forBoundary: $0.boundary) }
+        let reproduced = SimpleLayout.compute(
+            count: 3, in: screen, gaps: Gaps(inner: 5, outer: 5), ratios: recovered)
+        #expect(reproduced.rects == original.rects)
+    }
+
     // MARK: - 最小寸法の尊重
 
     // アプリには縮められない下限がある（実測: Chrome の最小高さは 469pt）。
