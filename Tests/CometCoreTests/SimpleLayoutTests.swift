@@ -198,6 +198,68 @@ struct SimpleLayoutTests {
         #expect(spiral(count, gaps: Gaps(inner: 5, outer: 5)).count == count)
     }
 
+    // MARK: - 最小寸法の尊重
+
+    // アプリには縮められない下限がある（実測: Chrome の最小高さは 469pt）。
+    // 下限を無視して割り当てると、そのウィンドウが隣にはみ出して重なる。
+    // 下限を渡したら、兄弟が譲って間隔が保たれること。
+    @Test("最小寸法を持つウィンドウには少なくともその寸法が割り当てられる")
+    func minimumSizeIsRespected() {
+        let minimums = [CGSize(width: 800, height: 0), .zero]
+        let rects = SimpleLayout.spiral(count: 2, in: screen, gaps: .zero, minimums: minimums)
+        #expect(rects[0].width >= 800)
+        #expect(rects[1].width == screen.width - rects[0].width, "兄弟が譲る")
+    }
+
+    @Test("後続のウィンドウの最小寸法も考慮される")
+    func laterMinimumShrinksEarlierWindow() {
+        let minimums = [.zero, CGSize(width: 800, height: 0)]
+        let rects = SimpleLayout.spiral(count: 2, in: screen, gaps: .zero, minimums: minimums)
+        #expect(rects[1].width >= 800, "後ろのウィンドウが下限を確保する")
+        #expect(rects[0].width <= 200)
+    }
+
+    @Test("最小寸法が満たせるなら重なりも隙間も出ない")
+    func minimumSizeKeepsGapsExact() {
+        let gaps = Gaps(inner: 5, outer: 5)
+        let minimums = [.zero, .zero, CGSize(width: 0, height: 500), .zero]
+        let rects = SimpleLayout.spiral(count: 4, in: screen, gaps: gaps, minimums: minimums)
+
+        for i in 0..<rects.count {
+            for j in (i + 1)..<rects.count {
+                let overlap = rects[i].intersection(rects[j])
+                #expect(overlap.isNull || overlap.width == 0 || overlap.height == 0)
+            }
+        }
+        let usable = gaps.usableArea(in: screen)
+        #expect(rects.map(\.maxX).max() == usable.maxX)
+        #expect(rects.map(\.maxY).max() == usable.maxY)
+    }
+
+    // 全員の下限を同時に満たせないことはある。片方だけ満たすと、割を食った側が
+    // 一方的にはみ出す。比例配分にして不足を分け合う。
+    @Test("最小寸法を同時に満たせない場合は比例配分になる")
+    func impossibleMinimumsAreSharedProportionally() {
+        let minimums = [CGSize(width: 800, height: 0), CGSize(width: 800, height: 0)]
+        let rects = SimpleLayout.spiral(count: 2, in: screen, gaps: .zero, minimums: minimums)
+        #expect(rects[0].width == 500, "半々に分け合う")
+        #expect(rects[1].width == 500)
+    }
+
+    @Test("最小寸法の配列が短くても落ちない")
+    func shortMinimumsArrayIsTolerated() {
+        let rects = SimpleLayout.spiral(
+            count: 4, in: screen, gaps: .zero, minimums: [CGSize(width: 700, height: 0)])
+        #expect(rects.count == 4)
+        #expect(rects[0].width >= 700)
+    }
+
+    @Test("最小寸法を渡さなければ従来どおり")
+    func emptyMinimumsPreserveBehavior() {
+        #expect(spiral(4, gaps: Gaps(inner: 5, outer: 5))
+            == SimpleLayout.spiral(count: 4, in: screen, gaps: Gaps(inner: 5, outer: 5), minimums: []))
+    }
+
     // 範囲外の比率は「手前側が領域内に収まる」という分割の前提を壊す。
     @Test("範囲外の分割比は丸められる", arguments: [-1.0, 0.0, 1.0, 2.0] as [CGFloat])
     func outOfRangeRatioIsClamped(ratio: CGFloat) {

@@ -123,6 +123,15 @@ public struct FrameCoalescer {
         inFlight.remove(windowID)
     }
 
+    /// 適用履歴を破棄する。
+    ///
+    /// アプリが目標どおりに動かなかった場合、同じ矩形を再投入しても
+    /// 「適用済みと同じ」と判定されて発行されない。補正を投げ直すには
+    /// 先に履歴を捨てる必要がある。
+    public mutating func invalidate(_ windowID: CGWindowID) {
+        applied.removeValue(forKey: windowID)
+    }
+
     /// ウィンドウが消えたときに全ての状態を捨てる。
     ///
     /// 適用履歴も消すので、同じ ID が再利用されても前回の矩形と誤って

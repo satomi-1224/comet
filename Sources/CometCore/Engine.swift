@@ -56,6 +56,10 @@ public final class Engine: WindowResolving {
     /// 再配置が予約済みか。同一ランループ内の複数回要求を1回にまとめる。
     private var isRelayoutScheduled = false
 
+    /// アプリが縮小を拒否した実績から学習した最小寸法。
+    /// 例: Chrome の最小高さは実測 469pt。
+    private var minimumSizes: [CGWindowID: CGSize] = [:]
+
     public var gaps: Gaps
     /// レイアウトを計算するがウィンドウは動かさない。
     /// 他の WM が動いている環境でも安全に検証できるようにするための逃げ道。
@@ -227,6 +231,7 @@ public final class Engine: WindowResolving {
                 idsByElement.removeValue(forKey: element)
             }
             scheduler.forget(id)
+            minimumSizes.removeValue(forKey: id)
         }
         observerHub.detach(pid: pid)
         applierPool.removeQueue(for: pid)
@@ -338,6 +343,7 @@ public final class Engine: WindowResolving {
         elements.removeValue(forKey: id)
         registry.remove(id)
         scheduler.forget(id)
+        minimumSizes.removeValue(forKey: id)
         observerHub.unobserve(window: element)
         log.debug("削除 [\(id)]")
         relayout()
@@ -373,7 +379,8 @@ public final class Engine: WindowResolving {
         guard !tiled.isEmpty else { return }
 
         let rects = SimpleLayout.spiral(
-            count: tiled.count, in: monitor.visibleFrame, gaps: gaps, scale: monitor.scale)
+            count: tiled.count, in: monitor.visibleFrame, gaps: gaps, scale: monitor.scale,
+            minimums: tiled.map { minimumSizes[$0] ?? .zero })
         guard rects.count == tiled.count else {
             log.warn("レイアウトを算出できなかった (ウィンドウ \(tiled.count) 枚, 領域 \(monitor.visibleFrame))")
             return
@@ -419,13 +426,45 @@ public final class Engine: WindowResolving {
     public func pid(for id: CGWindowID) -> pid_t? { registry[id]?.pid }
     public func observedFrame(for id: CGWindowID) -> CGRect? { registry[id]?.observedFrame }
 
-    public func didApply(_ id: CGWindowID, frame: CGRect, succeeded: Bool) {
-        guard succeeded else {
+    public func didApply(_ id: CGWindowID, target: CGRect, observed: CGRect?, succeeded: Bool) {
+        if !succeeded {
             log.debug("適用に失敗 [\(id)]")
-            return
         }
-        // 実際に反映されたかは読み戻していないので楽観的に記録する。
-        // 拡大/縮小の順序判定に使うだけなので多少ずれても害はない。
-        registry.update(id) { $0.observedFrame = frame }
+        // 読み戻せた場合はそれを記録する。読めなかった場合（位置のみ設定など）は
+        // 楽観的に目標を記録しておく。
+        registry.update(id) { $0.observedFrame = observed ?? target }
+
+        guard let observed else { return }
+        learnMinimum(id, target: target, observed: observed)
+    }
+
+    /// 目標より大きくなった＝アプリ側の下限に当たった。学習してレイアウトに反映する。
+    ///
+    /// 下限を無視して割り当て続けると、そのウィンドウが隣にはみ出して重なり、
+    /// 間隔が崩れる。兄弟に譲らせることで配置を成立させる。
+    ///
+    /// 学習値は単調増加で、実際の下限で頭打ちになるので発散しない。
+    /// 兄弟同士の下限が同時に満たせない場合は比例配分に落ちるが、
+    /// そこでも学習値は増えないので再配置は繰り返されない。
+    private func learnMinimum(_ id: CGWindowID, target: CGRect, observed: CGRect) {
+        let slack: CGFloat = 1
+        var learned = minimumSizes[id] ?? .zero
+        var changed = false
+
+        if observed.width > target.width + slack, observed.width > learned.width {
+            learned.width = observed.width
+            changed = true
+        }
+        if observed.height > target.height + slack, observed.height > learned.height {
+            learned.height = observed.height
+            changed = true
+        }
+
+        guard changed else { return }
+        minimumSizes[id] = learned
+        log.debug(
+            "[\(id)] の最小寸法を学習: \(Int(learned.width))x\(Int(learned.height))"
+                + "（要求 \(Int(target.width))x\(Int(target.height))）")
+        relayout()
     }
 }

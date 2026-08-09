@@ -122,39 +122,58 @@ public enum AXBridge {
     /// ウィンドウを目標矩形へ動かす。
     ///
     /// AX には位置とサイズを一括設定する API が無いため最低2回の IPC が要る。
-    /// その間の中間状態が描画されるのが「パラつき」の正体なので、順序で緩和する。
     ///
-    /// - 拡大時: サイズ → 位置（先に広げないと移動先で切り詰められて見える）
-    /// - 縮小時: 位置 → サイズ（先に縮めると移動前に隙間が見える）
+    /// **順序は必ず「位置 → サイズ」。**
+    ///
+    /// AX の位置は画面外へも設定できる（ワークスペースの画面外退避が成立するのはこのため）
+    /// 一方、**サイズは現在位置から画面端までに頭打ちされる**。したがって古い位置のまま
+    /// 先にサイズを設定すると、移動先では収まるはずの幅が切り詰められる。
+    ///
+    /// Phase 1 の実機検証で確認した例:
+    /// x=1707 にあるウィンドウを (5, 61) 1273×1598 へ動かす際、サイズを先に設定すると
+    /// 幅が **853 = 2560 − 1707**、つまり画面右端までの残り幅に切り詰められた。
+    /// 位置を先に設定すればこの頭打ちは起きない。
     ///
     /// - Parameters:
-    ///   - current: 直前に観測した矩形。拡大か縮小かの判定に使う。不明なら拡大とみなす。
+    ///   - current: 直前に観測した矩形。現状は使わないが、Phase 4 の補正判定で使う。
     ///   - setSize: `false` なら位置だけを設定して IPC を1回に減らす。
-    /// - Returns: 全ての設定が成功したか。
-    @discardableResult
+    /// - Returns: 設定の成否と、設定直後に読み戻した実際の矩形。
     public static func applyFrame(
         _ target: CGRect,
         setSize: Bool,
         current: CGRect?,
         to element: AXUIElement
-    ) -> Bool {
+    ) -> FrameApplyResult {
         // 引数名 setSize が静的メソッド setSize(_:on:) を隠すので Self. で明示する。
+        let moved = Self.setPosition(target.origin, on: element)
         guard setSize else {
-            return Self.setPosition(target.origin, on: element)
+            return FrameApplyResult(succeeded: moved, observed: nil)
         }
+        let sized = Self.setSize(target.size, on: element)
 
-        let isGrowing =
-            current.map { target.width > $0.width || target.height > $0.height } ?? true
+        // 設定が成功しても、アプリの最小サイズや画面端の制約で実際の矩形は違いうる。
+        // 目標どおりに並んでいるかを保証するには読み戻すしかない（1往復）。
+        return FrameApplyResult(succeeded: moved && sized, observed: Self.readFrame(element))
+    }
 
-        if isGrowing {
-            let sized = Self.setSize(target.size, on: element)
-            let moved = Self.setPosition(target.origin, on: element)
-            return sized && moved
-        } else {
-            let moved = Self.setPosition(target.origin, on: element)
-            let sized = Self.setSize(target.size, on: element)
-            return moved && sized
-        }
+    /// 適用の結果。
+    public struct FrameApplyResult: Sendable {
+        /// AX の設定呼び出しが成功したか。実際に反映されたかは別。
+        public let succeeded: Bool
+        /// 設定直後に読み戻した矩形。読めなければ nil。
+        public let observed: CGRect?
+    }
+
+    /// 位置とサイズを**1往復**で読む。
+    public static func readFrame(_ element: AXUIElement) -> CGRect? {
+        var raw: CFArray?
+        let error = AXUIElementCopyMultipleAttributeValues(
+            element, [AXAttribute.position, AXAttribute.size] as CFArray,
+            AXCopyMultipleAttributeOptions(rawValue: 0), &raw)
+        guard error == .success, let values = raw as? [Any], values.count == 2,
+            let origin = point(from: values[0]), let size = size(from: values[1])
+        else { return nil }
+        return CGRect(origin: origin, size: size)
     }
 
     @discardableResult

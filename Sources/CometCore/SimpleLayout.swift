@@ -35,14 +35,19 @@ public enum SimpleLayout {
     /// **分割の境界だけを格子に載せ、残り側の終端は元の領域の終端に固定する。**
     /// こうすると分割間隔がギャップと厳密に一致し、外周も領域にぴったり接する。
     ///
-    /// - Parameter ratio: 各分割で手前側が取る割合。
+    /// - Parameters:
+    ///   - ratio: 各分割で手前側が取る割合。
+    ///   - minimums: ウィンドウごとの最小寸法（登録順）。不明な要素は `.zero`。
+    ///     アプリが指定より小さくならない場合、そのぶん兄弟が譲らないと
+    ///     はみ出して重なる。学習した最小寸法を渡すと分割位置がそれを避ける。
     /// - Returns: 配置できない場合（枚数が 0 以下、領域が潰れている）は空配列。
     public static func spiral(
         count: Int,
         in area: CGRect,
         gaps: Gaps,
         scale: CGFloat = 2,
-        ratio: CGFloat = 0.5
+        ratio: CGFloat = 0.5,
+        minimums: [CGSize] = []
     ) -> [CGRect] {
         guard count > 0 else { return [] }
 
@@ -64,13 +69,30 @@ public enum SimpleLayout {
                 rects.append(remaining)
                 break
             }
+            // このウィンドウの最小寸法と、残りのウィンドウが必要とする最小寸法。
+            // 残り領域は次に別軸で分割されるので、この軸方向には残り全員が
+            // 領域いっぱいを使う。したがって残り側の要求は最大値を取る。
+            let firstMinimum = extent(minimum(minimums, at: index), along: orientation)
+            let restMinimum = (index + 1..<count)
+                .map { extent(minimum(minimums, at: $0), along: orientation) }
+                .max() ?? 0
+
             let (first, rest) = split(
-                remaining, orientation: orientation, gaps: gaps, scale: scale, ratio: ratio)
+                remaining, orientation: orientation, gaps: gaps, scale: scale, ratio: ratio,
+                firstMinimum: firstMinimum, restMinimum: restMinimum)
             rects.append(first)
             remaining = rest
             orientation = orientation.flipped
         }
         return rects
+    }
+
+    private static func extent(_ size: CGSize, along orientation: Orientation) -> CGFloat {
+        orientation == .horizontal ? size.width : size.height
+    }
+
+    private static func minimum(_ minimums: [CGSize], at index: Int) -> CGSize {
+        index >= 0 && index < minimums.count ? minimums[index] : .zero
     }
 
     /// 領域を2つに割る。手前側が `ratio`、残りが元の終端まで。
@@ -79,14 +101,24 @@ public enum SimpleLayout {
         orientation: Orientation,
         gaps: Gaps,
         scale: CGFloat,
-        ratio: CGFloat
+        ratio: CGFloat,
+        firstMinimum: CGFloat,
+        restMinimum: CGFloat
     ) -> (first: CGRect, rest: CGRect) {
+        let gap = orientation == .horizontal ? gaps.innerHorizontal : gaps.innerVertical
+        let start = orientation == .horizontal ? rect.minX : rect.minY
+        let end = orientation == .horizontal ? rect.maxX : rect.maxY
+        let available = max(0, (end - start) - gap)
+
+        let length = firstLength(
+            available: available, ratio: ratio,
+            firstMinimum: firstMinimum, restMinimum: restMinimum)
+
+        let boundary = Geometry.rounded(start + length, scale: scale)
+        let restStart = min(Geometry.rounded(boundary + gap, scale: scale), end)
+
         switch orientation {
         case .horizontal:
-            let gap = gaps.innerHorizontal
-            let available = max(0, rect.width - gap)
-            let boundary = Geometry.rounded(rect.minX + available * ratio, scale: scale)
-            let restStart = min(Geometry.rounded(boundary + gap, scale: scale), rect.maxX)
             return (
                 CGRect(
                     x: rect.minX, y: rect.minY,
@@ -95,12 +127,7 @@ public enum SimpleLayout {
                     x: restStart, y: rect.minY,
                     width: max(0, rect.maxX - restStart), height: rect.height)
             )
-
         case .vertical:
-            let gap = gaps.innerVertical
-            let available = max(0, rect.height - gap)
-            let boundary = Geometry.rounded(rect.minY + available * ratio, scale: scale)
-            let restStart = min(Geometry.rounded(boundary + gap, scale: scale), rect.maxY)
             return (
                 CGRect(
                     x: rect.minX, y: rect.minY,
@@ -110,5 +137,28 @@ public enum SimpleLayout {
                     width: rect.width, height: max(0, rect.maxY - restStart))
             )
         }
+    }
+
+    /// 手前側に割り当てる長さ。最小寸法を尊重する。
+    ///
+    /// 両者の最小を同時に満たせない場合は、最小寸法に比例して不足を分け合う。
+    /// どちらか一方だけを満たすと、割を食った側が一方的にはみ出して重なるため。
+    private static func firstLength(
+        available: CGFloat,
+        ratio: CGFloat,
+        firstMinimum: CGFloat,
+        restMinimum: CGFloat
+    ) -> CGFloat {
+        let desired = available * ratio
+        let lowerBound = min(firstMinimum, available)
+        let upperBound = available - restMinimum
+
+        guard lowerBound <= upperBound else {
+            // 双方の最小を満たせない。比例配分で不足を分け合う。
+            let total = firstMinimum + restMinimum
+            guard total > 0 else { return desired }
+            return available * (firstMinimum / total)
+        }
+        return min(max(desired, lowerBound), upperBound)
     }
 }

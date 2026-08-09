@@ -227,6 +227,41 @@ struct FrameCoalescerTests {
 
     // MARK: - 想定外の入力
 
+    // アプリが目標どおりに動かなかったときの補正は、同じ矩形を投げ直すことになる。
+    // 適用履歴が残っていると「変化なし」と判定されて発行されない。
+    @Test("invalidate すると同じ目標でも再発行される")
+    func invalidateAllowsResubmit() {
+        var coalescer = FrameCoalescer()
+        coalescer.submit(1, target(100))
+        _ = coalescer.drain()
+        coalescer.complete(1)
+
+        coalescer.submit(1, target(100))
+        #expect(coalescer.drain().isEmpty, "履歴があるうちは発行しない")
+
+        coalescer.invalidate(1)
+        coalescer.submit(1, target(100))
+        #expect(coalescer.drain().count == 1, "履歴を捨てれば発行される")
+    }
+
+    @Test("invalidate は待機中と適用中には触れない")
+    func invalidateLeavesQueuesIntact() {
+        var coalescer = FrameCoalescer()
+        coalescer.submit(1, target(100))
+        _ = coalescer.drain()
+
+        coalescer.invalidate(1)
+        #expect(coalescer.inFlightCount == 1, "適用中の状態は保つ")
+        #expect(coalescer.appliedFrame(1) == nil, "履歴だけが消える")
+    }
+
+    @Test("知らないウィンドウの invalidate は無害")
+    func invalidateUnknownIsHarmless() {
+        var coalescer = FrameCoalescer()
+        coalescer.invalidate(999)
+        #expect(coalescer.isIdle)
+    }
+
     @Test("知らないウィンドウの complete は無害")
     func completeUnknownIsHarmless() {
         var coalescer = FrameCoalescer()

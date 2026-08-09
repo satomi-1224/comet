@@ -11,7 +11,7 @@ public protocol WindowResolving: AnyObject {
     func element(for id: CGWindowID) -> AXElement?
     func pid(for id: CGWindowID) -> pid_t?
     func observedFrame(for id: CGWindowID) -> CGRect?
-    func didApply(_ id: CGWindowID, frame: CGRect, succeeded: Bool)
+    func didApply(_ id: CGWindowID, target: CGRect, observed: CGRect?, succeeded: Bool)
 }
 
 /// ``FrameCoalescer`` を時間軸に載せ、PID ごとのキューへ振り分ける薄いラッパ。
@@ -28,18 +28,25 @@ public final class FrameScheduler {
     private let applierPool: ApplierPool
     private weak var resolver: (any WindowResolving)?
     private let interval: TimeInterval
+    private let tolerance: CGFloat
+    private let maxCorrections: Int
     private let log: Log
 
     private var isTicking = false
+    /// 目標どおりにならなかったウィンドウの補正回数。目標が変われば数え直す。
+    private var corrections: [CGWindowID: (target: CGRect, count: Int)] = [:]
 
     public init(
         applierPool: ApplierPool,
         interval: TimeInterval = 0.008,
         tolerance: CGFloat = 0.5,
+        maxCorrections: Int = 3,
         log: Log = .shared
     ) {
         self.applierPool = applierPool
         self.interval = interval
+        self.tolerance = tolerance
+        self.maxCorrections = maxCorrections
         self.coalescer = FrameCoalescer(tolerance: tolerance)
         self.log = log
     }
@@ -68,6 +75,7 @@ public final class FrameScheduler {
 
     public func forget(_ id: CGWindowID) {
         coalescer.forget(id)
+        corrections.removeValue(forKey: id)
     }
 
     // MARK: - 駆動
@@ -113,20 +121,73 @@ public final class FrameScheduler {
         let target = request.target
 
         applierPool.queue(for: pid).async {
-            let succeeded = AXBridge.applyFrame(
+            let result = AXBridge.applyFrame(
                 target.rect, setSize: target.setSize, current: current, to: element.raw)
             Task { @MainActor in
-                self.finish(id, frame: target.rect, succeeded: succeeded)
+                self.finish(id, target: target, result: result)
             }
         }
     }
 
-    private func finish(_ id: CGWindowID, frame: CGRect, succeeded: Bool) {
+    private func finish(_ id: CGWindowID, target: TargetFrame, result: AXBridge.FrameApplyResult) {
         coalescer.complete(id)
-        resolver?.didApply(id, frame: frame, succeeded: succeeded)
+        resolver?.didApply(
+            id, target: target.rect, observed: result.observed, succeeded: result.succeeded)
+
+        correctIfNeeded(id, target: target, observed: result.observed)
+
         // 適用中に溜まった分があれば拾い直す。
         if coalescer.pendingCount > 0 {
             kick()
         }
+    }
+
+    /// 目標どおりにならなかったら投げ直す。
+    ///
+    /// アプリの最小サイズや画面端の制約で、設定が成功しても実際の矩形は違いうる。
+    /// そのままだと隣との間隔が崩れて重なりや隙間になるので、上限つきで補正する。
+    private func correctIfNeeded(_ id: CGWindowID, target: TargetFrame, observed: CGRect?) {
+        guard let observed else {
+            corrections.removeValue(forKey: id)
+            return
+        }
+
+        guard !Geometry.isApproximatelyEqual(observed, target.rect, tolerance: tolerance) else {
+            corrections.removeValue(forKey: id)
+            return
+        }
+
+        // 目標が変わっていれば数え直す。同じ目標に対してだけ上限をかける。
+        var attempt = corrections[id]
+        if let existing = attempt,
+            !Geometry.isApproximatelyEqual(existing.target, target.rect, tolerance: tolerance)
+        {
+            attempt = nil
+        }
+        let count = (attempt?.count ?? 0) + 1
+
+        guard count <= maxCorrections else {
+            log.warn(
+                "[\(id)] が目標に追従しない。要求 \(rendered(target.rect)) / 実際 \(rendered(observed))。"
+                    + "\(maxCorrections) 回の補正で一致しなかったため諦める（アプリ側の制約と思われる）")
+            corrections.removeValue(forKey: id)
+            return
+        }
+
+        corrections[id] = (target: target.rect, count: count)
+        log.debug("[\(id)] 補正 \(count)/\(maxCorrections): 実際 \(rendered(observed))")
+
+        // 適用履歴を捨てないと「同じ矩形なので不要」と判定されて発行されない。
+        coalescer.invalidate(id)
+        coalescer.submit(id, target)
+        kick()
+    }
+
+    private func rendered(_ rect: CGRect) -> String {
+        "(\(Int(rect.minX)),\(Int(rect.minY))) \(Int(rect.width))x\(Int(rect.height))"
+    }
+
+    public func forgetCorrections(_ id: CGWindowID) {
+        corrections.removeValue(forKey: id)
     }
 }

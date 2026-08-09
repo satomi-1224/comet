@@ -20,7 +20,7 @@ struct FrameSchedulerTests {
         func element(for id: CGWindowID) -> AXElement? { nil }
         func pid(for id: CGWindowID) -> pid_t? { nil }
         func observedFrame(for id: CGWindowID) -> CGRect? { nil }
-        func didApply(_ id: CGWindowID, frame: CGRect, succeeded: Bool) {
+        func didApply(_ id: CGWindowID, target: CGRect, observed: CGRect?, succeeded: Bool) {
             appliedCalls.append(id)
         }
     }
