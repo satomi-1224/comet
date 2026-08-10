@@ -108,6 +108,8 @@ public enum ConfigLoader {
             }
         }
 
+        configuration.startAtLogin = raw.startAtLogin ?? configuration.startAtLogin
+
         if let workspaces = raw.workspaces {
             if let value = workspaces.count {
                 // 0 個だと有効なワークスペースが存在しない。上限はキーバインドの現実的な数。
@@ -378,6 +380,7 @@ private enum CommandSpec: Decodable {
 }
 
 private struct RawConfiguration: Decodable {
+    var startAtLogin: Bool?
     var normalization: RawNormalization?
     var layout: RawLayout?
     var workspaces: RawWorkspaces?
@@ -391,6 +394,7 @@ private struct RawConfiguration: Decodable {
     var windowRule: [RawWindowRule]?
 
     enum CodingKeys: String, CodingKey {
+        case startAtLogin = "start-at-login"
         case normalization, layout, workspaces, gaps, performance, debug
         case border, indicator, wallpaper, mode
         case windowRule = "window-rule"

@@ -61,6 +61,10 @@ public enum Command: Equatable, Sendable, CustomStringConvertible {
     case workspace(WorkspaceTarget)
     /// フォーカス中のウィンドウを別のワークスペースへ移す。表示は切り替えない。
     case moveNodeToWorkspace(WorkspaceID)
+    /// フォーカス中のウィンドウを閉じる。
+    case closeWindow
+    /// 設定を読み直す。**ツリーの形は保つ。**
+    case reloadConfig
 
     /// 設定に書ける綴りへ戻す。ログで「どのコマンドが動いたか」を追えるようにする。
     public var description: String {
@@ -78,6 +82,8 @@ public enum Command: Equatable, Sendable, CustomStringConvertible {
             "workspace back-and-forth"
         case .moveNodeToWorkspace(let id):
             "move-node-to-workspace \(id)"
+        case .closeWindow: "close-window"
+        case .reloadConfig: "reload-config"
         }
     }
 
@@ -110,7 +116,7 @@ public enum Command: Equatable, Sendable, CustomStringConvertible {
     /// 「不明」と分けておかないと、設定の綴り間違いなのか未実装なのかが区別できない。
     private static let plannedCommands: Set<String> = [
         "move-workspace-to-monitor", "move-node-to-monitor", "fullscreen", "mode",
-        "close-window", "reload-config", "focus-monitor", "flatten-workspace-tree",
+        "focus-monitor", "flatten-workspace-tree",
     ]
 
     public static func parse(_ text: String) throws -> Command {
@@ -133,11 +139,24 @@ public enum Command: Equatable, Sendable, CustomStringConvertible {
             return .workspace(try parseWorkspaceTarget(arguments))
         case "move-node-to-workspace":
             return .moveNodeToWorkspace(try parseWorkspaceID(name, arguments))
+        case "close-window":
+            return try noArguments(name, arguments, .closeWindow)
+        case "reload-config":
+            return try noArguments(name, arguments, .reloadConfig)
         default:
             throw plannedCommands.contains(name)
                 ? ParseError.unsupported(name: name)
                 : ParseError.unknown(name: name)
         }
+    }
+
+    private static func noArguments(
+        _ name: String, _ arguments: [String], _ command: Command
+    ) throws -> Command {
+        guard arguments.isEmpty else {
+            throw ParseError.wrongArgumentCount(name: name, expected: "0", got: arguments.count)
+        }
+        return command
     }
 
     private static func parseDirection(_ name: String, _ arguments: [String]) throws -> Direction {

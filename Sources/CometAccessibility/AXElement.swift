@@ -48,6 +48,7 @@ public enum AXAttribute {
     public static let focusedWindow = "AXFocusedWindow"
     public static let main = "AXMain"
     public static let focused = "AXFocused"
+    public static let closeButton = "AXCloseButton"
     /// 支援技術向けの非公開属性。有効なアプリではウィンドウ操作が遅くなる。
     public static let enhancedUserInterface = "AXEnhancedUserInterface"
 }
@@ -55,6 +56,7 @@ public enum AXAttribute {
 /// AX アクション名。
 public enum AXAction {
     public static let raise = "AXRaise"
+    public static let press = "AXPress"
 }
 
 /// AX 通知名。

@@ -65,6 +65,8 @@ public struct Configuration: Sendable, Equatable {
     public var normalization = NormalizationConfig.default
     public var insertionStrategy = TreeSync.InsertionStrategy.split
     public var defaultOrientation = DefaultOrientation.auto
+    /// ログイン時に自動起動するか。**アプリバンドルで動かしているときだけ効く。**
+    public var startAtLogin = false
     public var workspaceCount = 10
     /// 非表示ワークスペースのウィンドウがアクティブになったらそちらへ移るか。
     public var focusFollowsActivation = true
@@ -92,6 +94,11 @@ public struct Configuration: Sendable, Equatable {
         #
         # 置き場所: ~/.config/comet/config.toml
         # この内容は `comet --print-default-config` で出力できる。
+        #
+        # 保存すると自動で読み直す（ツリーの形は保たれる）。
+
+        # ログイン時に自動起動する。アプリバンドルで動かしているときだけ効く。
+        start-at-login = false
 
         [normalization]
         # 子が1つだけのコンテナを潰し、その子を親へ昇格させる

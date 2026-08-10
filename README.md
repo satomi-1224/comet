@@ -7,7 +7,7 @@ Swift 製の単一プロセスに置き換えることを目的とする。
 
 ## 現在の状態
 
-**Phase 5（内蔵UI）まで実装済み。**
+**Phase 6（常用化）まで実装済み。**
 
 - ウィンドウを開くと自動でタイルされ、閉じると再配置される
 - `focus` / `move` / `resize` / `join-with` / `layout` が動く
@@ -16,7 +16,8 @@ Swift 製の単一プロセスに置き換えることを目的とする。
 - 寸法を無視するアプリは自動でフローティングへ降格する
 - `[debug] timing = true` + `ctrl-alt-shift-t` でアプリ別の適用レイテンシが出る
 - フォーカス枠線・ワークスペースインジケータ（メニューバー + HUD）・壁紙切替
-- 残りは常用化（設定のホットリロード、ログイン起動）
+- 設定は**保存すると自動で読み直す**（ツリーの形は保たれる）
+- ログイン起動（`start-at-login = true`）
 
 進捗の詳細は [PROGRESS.md](PROGRESS.md)。
 
@@ -45,6 +46,26 @@ build/comet.app/Contents/MacOS/comet --log-level debug
 open build/comet.app
 log stream --predicate 'subsystem == "local.comet"'
 ```
+
+### コマンド
+
+設定の `[mode.main.binding]` に書ける。綴りは AeroSpace 互換。
+
+| コマンド | 動作 |
+|---|---|
+| `focus left\|down\|up\|right` | 方向フォーカス |
+| `move left\|down\|up\|right` | ウィンドウを方向へ移動 |
+| `resize width\|height ±N` | 分割の境界を動かす |
+| `join-with left\|down\|up\|right` | 隣と新しいコンテナを作る |
+| `layout tiles horizontal vertical` | 親コンテナの向きを巡回 |
+| `layout floating tiling` | フローティングとタイルを切替 |
+| `workspace 1..N\|back-and-forth` | ワークスペース切替 |
+| `move-node-to-workspace N` | ウィンドウを別のワークスペースへ |
+| `close-window` | ウィンドウを閉じる |
+| `reload-config` | 設定を読み直す |
+
+未対応（後続で実装）: `fullscreen` / `move-node-to-monitor` / `mode` /
+`focus-monitor` / `flatten-workspace-tree`。書いてあっても起動時に飛ばされる。
 
 ### オプション
 
@@ -129,7 +150,30 @@ macOS ネイティブの Spaces は常に1つだけ使うので、切替に OS �
 | Stage Manager | オフ |
 | アクセシビリティ > 視差効果を減らす | オン推奨 |
 
-## 初回セットアップ
+## セットアップ
+
+```bash
+# 1. 署名 ID を作る（一度だけ。下の「1.」参照）
+./scripts/make-signing-cert.sh
+
+# 2. .app を組み立てる
+./scripts/build-app.sh release
+
+# 3. 設定の雛形を置く
+mkdir -p ~/.config/comet
+./build/comet.app/Contents/MacOS/comet --print-default-config > ~/.config/comet/config.toml
+
+# 4. macOS のシステム設定を合わせる（下の「3.」参照）
+
+# 5. AeroSpace を止める
+osascript -e 'quit app "AeroSpace"'
+
+# 6. 前景で起動して様子を見る
+./build/comet.app/Contents/MacOS/comet --log-level debug
+
+# 7. 問題なければ常駐に切り替え、設定に start-at-login = true を書く
+open build/comet.app
+```
 
 ### 1. 署名 ID を作る（推奨・一度だけ）
 
@@ -153,6 +197,32 @@ macOS ネイティブの Spaces は常に1つだけ使うので、切替に OS �
 ```bash
 tccutil reset Accessibility local.comet
 ```
+
+### 3. 必須のシステム設定
+
+画面外退避方式（ワークスペース）はネイティブ Space が1つであることを前提にしている。
+以下が合っていないと配置が崩れる。
+
+| 設定 | 値 | 理由 |
+|---|---|---|
+| Mission Control > ディスプレイごとに個別の操作スペース | **オフ** | ネイティブ Space を1つに保つ |
+| Mission Control > 最新の使用状況に基づいて操作スペースを自動的に並べ替える | **オフ** | 順序が動くと座標系の前提が崩れる |
+| Stage Manager | **オフ** | ウィンドウ配置を横取りする |
+| アクセシビリティ > 視差効果を減らす | **オン推奨** | ウィンドウ移動時の OS アニメーションを抑える |
+
+**緑ボタンのフルスクリーンは使わない。** 独自の Space を作るため画面外退避と衝突する。
+フルスクリーン化されたウィンドウは管理対象から外れる。
+
+### 4. 移行時に消すもの
+
+| 対象 | 理由 |
+|---|---|
+| AeroSpace | ホットキーとウィンドウ配置を奪い合う |
+| `~/.config/aerospace/wallpaper.sh` の呼び出し | 壁紙は comet の `[wallpaper.map]` に移した |
+| Hammerspoon の「修飾キー + BS でウィンドウを閉じる」 | comet の `close-window` と重複する |
+
+Hammerspoon の `app_switcher.lua` / `clipboard.lua` / `search.lua` /
+`command_launcher*.lua` / `snippets*.lua` はそのまま残してよい。
 
 ## 開発上の注意
 

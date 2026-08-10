@@ -6,6 +6,7 @@ import CometCore
 import CometDecoration
 import CometInput
 import CometSupport
+import ServiceManagement
 
 // Phase 1 の到達点:
 //   「ウィンドウを開くと自動的にタイルされ、閉じると再配置される」
@@ -78,14 +79,14 @@ if options.printDefaultConfig {
 // MARK: - 設定
 
 // 設定の誤りで起動を止めない。読めなかった項目は既定値に落ちて `problems` に理由が残る。
-let configuration: Configuration
+let configPath = options.configPath ?? ConfigLoader.defaultPath()
+var configuration: Configuration
 let configSource: ConfigLoader.Source
 if options.ignoreConfig {
     configuration = ConfigLoader.builtIn()
     configSource = .builtIn
 } else {
-    (configuration, configSource) = ConfigLoader.load(
-        path: options.configPath ?? ConfigLoader.defaultPath())
+    (configuration, configSource) = ConfigLoader.load(path: configPath)
 }
 
 if let count = options.previewLayout {
@@ -114,18 +115,23 @@ case .builtIn:
 
 // 未対応コマンドは既定の設定にも並んでいるので、まとめて1行で伝える。
 // 綴り間違いなど直せる問題は1件ずつ出す。
-let unsupported = configuration.problems.filter {
-    $0.kind == .unsupportedCommand || $0.kind == .unsupportedMode
-}
-for problem in configuration.problems where !unsupported.contains(problem) {
-    log.warn("設定: \(problem)")
-}
-if !unsupported.isEmpty {
-    log.info("設定: 未対応のため \(unsupported.count) 件のバインドを飛ばした（後続の Phase で実装する）")
+@MainActor
+func reportConfigProblems(_ problems: [Problem]) {
+    let unsupported = problems.filter {
+        $0.kind == .unsupportedCommand || $0.kind == .unsupportedMode
+            || $0.kind == .unsupportedOption
+    }
+    for problem in problems where !unsupported.contains(problem) {
+        Log.shared.warn("設定: \(problem)")
+    }
+    guard !unsupported.isEmpty else { return }
+    Log.shared.info("設定: 未対応のため \(unsupported.count) 件を飛ばした（後続の Phase で実装する）")
     for problem in unsupported {
-        log.debug("設定: \(problem)")
+        Log.shared.debug("設定: \(problem)")
     }
 }
+
+reportConfigProblems(configuration.problems)
 
 // 非公開シンボルの解決状況を起動時に記録しておく。
 // OS アップデートで消えた場合、ここが最初の手がかりになる（設計書 §12.2）。
@@ -255,23 +261,28 @@ if engine.isTimingEnabled {
 
 // 複数コマンドの割り当ては**まとめて1回の再配置**にする。中間状態を適用しないことで
 // 「ウィンドウ移動 + 切替」が1フレームで完了する（設計書 §9.5）。
-var boundCount = 0
-for binding in configuration.bindings {
-    do {
-        try hotkeyManager.register(binding.hotkey) { _ in
-            for command in binding.commands {
-                engine.execute(command)
+@MainActor
+func registerConfiguredHotkeys(_ bindings: [Binding]) {
+    var bound = 0
+    for binding in bindings {
+        do {
+            try hotkeyManager.register(binding.hotkey) { _ in
+                for command in binding.commands {
+                    engine.execute(command)
+                }
             }
+            Log.shared.debug("登録: \(binding.spec) → \(binding.commands.count) コマンド")
+            bound += 1
+        } catch {
+            // 他のウィンドウマネージャが同じキーを掴んでいると失敗する。
+            // 1つ失敗しても残りは登録する。
+            Log.shared.warn("\(binding.spec) を登録できなかった: \(error)")
         }
-        log.debug("登録: \(binding.spec) → \(binding.commands.count) コマンド")
-        boundCount += 1
-    } catch {
-        // 他のウィンドウマネージャが同じキーを掴んでいると失敗する。
-        // 1つ失敗しても残りは登録する。
-        log.warn("\(binding.spec) を登録できなかった: \(error)")
     }
+    Log.shared.info("設定から \(bound)/\(bindings.count) 個のホットキーを登録した")
 }
-log.info("設定から \(boundCount)/\(configuration.bindings.count) 個のホットキーを登録した")
+
+registerConfiguredHotkeys(configuration.bindings)
 
 // MARK: - 制御用ホットキー
 
@@ -301,6 +312,7 @@ func terminateAfterRestoringWindows(reason: String) {
             Log.shared.info("計測: \(line)")
         }
     }
+    configWatcher.stop()
     decoration.stop()
     let restored = engine.prepareForTermination()
     guard restored > 0 else {
@@ -313,29 +325,124 @@ func terminateAfterRestoringWindows(reason: String) {
     }
 }
 
-registerControlHotkey("ctrl-alt-shift-q", label: "終了") {
-    terminateAfterRestoringWindows(reason: "終了ホットキーを受信した")
+@MainActor
+func registerControlHotkeys() {
+    registerControlHotkey("ctrl-alt-shift-q", label: "終了") {
+        terminateAfterRestoringWindows(reason: "終了ホットキーを受信した")
+    }
+
+    registerControlHotkey("ctrl-alt-shift-t", label: "計測の出力") {
+        let lines = engine.timingReport
+        guard !lines.isEmpty else {
+            Log.shared.info(
+                engine.isTimingEnabled
+                    ? "計測: まだ記録が無い" : "計測は無効（設定に [debug] timing = true を書く）")
+            return
+        }
+        Log.shared.info("計測: 適用レイテンシ")
+        for line in lines {
+            Log.shared.info("  \(line)")
+        }
+    }
+
+    registerControlHotkey("ctrl-alt-shift-r", label: "再配置") {
+        // 全ワークスペースの状態も出す。配置がおかしいときに、レイアウト計算・
+        // ツリーの組み方・所属ワークスペース・退避のどこがずれているのかを切り分けられる。
+        Log.shared.info("再配置を要求された: \(engine.stateDescription)")
+        engine.relayout()
+    }
 }
 
-registerControlHotkey("ctrl-alt-shift-t", label: "計測の出力") {
-    let lines = engine.timingReport
-    guard !lines.isEmpty else {
-        Log.shared.info(
-            engine.isTimingEnabled
-                ? "計測: まだ記録が無い" : "計測は無効（設定に [debug] timing = true を書く）")
+registerControlHotkeys()
+
+// MARK: - 設定のホットリロード
+
+// 起動時にしか組み立てられない値。再読込で変わっていたら知らせるために覚えておく。
+let startupPerformance = configuration.performance
+let startupStartAtLogin = configuration.startAtLogin
+
+// 設定を読み直す。**ツリーの形は保つ。** 設定を触るたびに配置が崩れると常用できない。
+//
+// ワークスペースの数だけは動かさない。増減させるとウィンドウの所属が壊れるので、
+// 変えたいときは再起動してもらう（起動時の値で固定する）。
+@MainActor
+func reloadConfiguration() {
+    let (reloaded, source) = ConfigLoader.load(path: configPath)
+    guard case .file(let path) = source else {
+        Log.shared.warn("設定を読み直せなかった（\(configPath) が読めない）。現状の設定を使い続ける")
+        reportConfigProblems(reloaded.problems)
         return
     }
-    Log.shared.info("計測: 適用レイテンシ")
-    for line in lines {
-        Log.shared.info("  \(line)")
+
+    configuration = reloaded
+    Log.shared.info("設定を読み直した: \(path)")
+    reportConfigProblems(reloaded.problems)
+
+    Log.shared.threshold = options.resolvedLogLevel(configured: reloaded.logLevel)
+
+    engine.gaps = reloaded.gaps
+    engine.normalization = reloaded.normalization
+    engine.insertionStrategy = reloaded.insertionStrategy
+    engine.defaultOrientation = reloaded.defaultOrientation
+    engine.windowRules = reloaded.windowRules
+    engine.focusFollowsActivation = reloaded.focusFollowsActivation
+
+    decoration.border.style = reloaded.border
+    decoration.indicator.style = reloaded.indicator
+    decoration.indicator.hudDuration = reloaded.hudDuration
+    decoration.loadWallpapers(reloaded.wallpapers)
+
+    // 起動時にしか組み立てられないものは、変わっていたら知らせる。
+    // 黙って無視すると「設定したのに効かない」で詰まる。
+    var needsRestart: [String] = []
+    if reloaded.workspaceCount != engine.workspaceCount {
+        needsRestart.append("[workspaces] count")
     }
+    if reloaded.performance != startupPerformance {
+        needsRestart.append("[performance] / [debug] timing")
+    }
+    if reloaded.startAtLogin != startupStartAtLogin {
+        needsRestart.append("start-at-login")
+    }
+    if !needsRestart.isEmpty {
+        Log.shared.warn(
+            "次の項目は再起動しないと反映されない: \(needsRestart.joined(separator: ", "))")
+    }
+
+    // ホットキーは全解除して張り直す。差分を取るより確実。
+    hotkeyManager.unregisterAll()
+    registerConfiguredHotkeys(reloaded.bindings)
+    registerControlHotkeys()
+
+    engine.configurationChanged()
 }
 
-registerControlHotkey("ctrl-alt-shift-r", label: "再配置") {
-    // 全ワークスペースの状態も出す。配置がおかしいときに、レイアウト計算・
-    // ツリーの組み方・所属ワークスペース・退避のどこがずれているのかを切り分けられる。
-    Log.shared.info("再配置を要求された: \(engine.stateDescription)")
-    engine.relayout()
+engine.onReloadRequested = { reloadConfiguration() }
+
+// 監視するのは**親ディレクトリ**。home-manager 管理下では config.toml は
+// Nix ストアへのシンボリックリンクで、switch のときリンク先が差し替わる。
+let configWatcher = ConfigWatcher(path: configPath, log: log)
+configWatcher.onChange = { reloadConfiguration() }
+if configWatcher.start() {
+    log.info("設定の変更を監視: \(configWatcher.watchedDirectory)")
+} else {
+    log.debug("設定ディレクトリが無いので監視しない: \(configWatcher.watchedDirectory)")
+}
+
+// MARK: - ログイン起動
+
+if configuration.startAtLogin {
+    if Bundle.main.bundleIdentifier != nil {
+        do {
+            try SMAppService.mainApp.register()
+            log.info("ログイン起動を有効にした")
+        } catch {
+            log.warn("ログイン起動を有効にできなかった: \(error)")
+        }
+    } else {
+        // 素の実行ファイルには登録できない。build-app.sh で .app にしてから使う。
+        log.warn("start-at-login はアプリバンドルでのみ有効（./scripts/build-app.sh を使う）")
+    }
 }
 
 // MARK: - 起動後に実行するコマンド

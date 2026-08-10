@@ -173,6 +173,7 @@ public final class Engine: WindowResolving {
     /// 表示中のワークスペースとツリーの形。`1: H[1, V[2, 3]]` の記法で返る。診断用。
     public var treeDescription: String { "\(workspaces.activeID): \(root)" }
     public var activeWorkspaceID: WorkspaceID { workspaces.activeID }
+    public var workspaceCount: Int { workspaces.count }
 
     /// 適用のレイテンシをアプリ別に整形した行。`[debug] timing = true` のときだけ中身が入る。
     ///
@@ -664,7 +665,52 @@ public final class Engine: WindowResolving {
 
         case .moveNodeToWorkspace(let id):
             moveFocusedWindow(to: id)
+
+        case .closeWindow:
+            closeFocusedWindow()
+
+        case .reloadConfig:
+            guard let handler = onReloadRequested else {
+                log.warn("設定の再読込が配線されていない")
+                return
+            }
+            handler()
         }
+    }
+
+    /// フォーカス中のウィンドウを閉じる。
+    ///
+    /// 破棄の通知（`AXUIElementDestroyed`）で台帳から外れるので、ここでは再配置しない。
+    private func closeFocusedWindow() {
+        guard let id = focusedWindowOnActiveWorkspace(),
+            let element = elements[id], let pid = registry[id]?.pid
+        else { return }
+
+        let title = registry[id]?.title?.prefix(40) ?? "?"
+        applierPool.queue(for: pid).async {
+            let closed = AXBridge.close(element.raw)
+            Task { @MainActor in
+                if closed {
+                    self.log.info("[\(id)] \(title) を閉じた")
+                } else {
+                    self.log.warn("[\(id)] \(title) を閉じられなかった（閉じるボタンが無い）")
+                }
+            }
+        }
+    }
+
+    /// 設定を読み直す要求。`main.swift` が配線する。
+    ///
+    /// `Engine` は設定ファイルの形式を知らないので、読み直しそのものは外に任せる。
+    public var onReloadRequested: (@MainActor () -> Void)?
+
+    /// 設定が変わったことを伝える。**ツリーの形は保つ。**
+    ///
+    /// gaps や既定の向きが変われば寸法が変わるので、全ワークスペースに
+    /// サイズの再適用を要求する。
+    public func configurationChanged() {
+        workspaces.markAllLayoutsDirty()
+        relayout()
     }
 
     // MARK: - ワークスペース

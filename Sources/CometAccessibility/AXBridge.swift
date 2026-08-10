@@ -187,6 +187,22 @@ public enum AXBridge {
         return isMain && raised
     }
 
+    /// ウィンドウを閉じる。
+    ///
+    /// AX に「閉じる」という操作は無いので、**閉じるボタンを押す**という形で行う。
+    /// ボタンを持たないウィンドウ（一部のパネル）では失敗する。
+    @discardableResult
+    public static func close(_ element: AXUIElement) -> Bool {
+        var raw: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(element, AXAttribute.closeButton as CFString, &raw)
+                == .success,
+            let value = raw, CFGetTypeID(value) == AXUIElementGetTypeID()
+        else { return false }
+        return AXUIElementPerformAction(value as! AXUIElement, AXAction.press as CFString)
+            == .success
+    }
+
     /// ウィンドウを目標矩形へ動かす。
     ///
     /// AX には位置とサイズを一括設定する API が無いため最低2回の IPC が要る。

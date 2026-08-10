@@ -472,6 +472,14 @@ struct TreeCommandTests {
 
     // Phase 3 以降のコマンドは「知っているが未対応」と伝える。設定に書いてあるのに
     // 黙って無視されると、キーが効かない原因が設定側か実装側か分からない。
+    @Test("引数を取らないコマンドを解釈する")
+    func parseArgumentlessCommands() throws {
+        #expect(try Command.parse("close-window") == .closeWindow)
+        #expect(try Command.parse("reload-config") == .reloadConfig)
+        #expect(throws: Command.ParseError.self) { try Command.parse("close-window now") }
+        #expect(throws: Command.ParseError.self) { try Command.parse("reload-config all") }
+    }
+
     @Test("ワークスペースのコマンドを解釈する")
     func parseWorkspaceCommands() throws {
         #expect(try Command.parse("workspace 1") == .workspace(.index(1)))
@@ -496,6 +504,7 @@ struct TreeCommandTests {
             "focus left", "move down", "resize width +50", "resize height -50",
             "join-with right", "layout tiles horizontal vertical", "layout floating tiling",
             "workspace 3", "workspace back-and-forth", "move-node-to-workspace 7",
+            "close-window", "reload-config",
         ]
         for spec in specs {
             let command = try Command.parse(spec)
@@ -506,7 +515,7 @@ struct TreeCommandTests {
 
     @Test("未実装のコマンドは未対応として区別できる")
     func parseReportsUnsupportedCommands() {
-        for spec in ["fullscreen", "mode resize", "close-window", "move-node-to-monitor next"] {
+        for spec in ["fullscreen", "mode resize", "move-node-to-monitor next"] {
             let name = String(spec.split(separator: " ")[0])
             #expect(throws: Command.ParseError.unsupported(name: name), "\"\(spec)\"") {
                 try Command.parse(spec)

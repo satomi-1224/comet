@@ -306,6 +306,13 @@ struct ConfigLoaderTests {
         #expect(configuration.gaps.innerHorizontal == 3)
     }
 
+    @Test("start-at-login を読める")
+    func parsesStartAtLogin() throws {
+        #expect(try ConfigLoader.parse("start-at-login = true").startAtLogin)
+        #expect(!Configuration().startAtLogin, "既定では登録しない")
+        #expect(!(try ConfigLoader.parse(Configuration.defaultTOML).startAtLogin))
+    }
+
     // MARK: - 見た目
 
     @Test("border を読める")
