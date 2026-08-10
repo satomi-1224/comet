@@ -37,10 +37,23 @@ public enum Geometry {
 
     /// 非表示ワークスペースのウィンドウを退避させる座標（AX 座標系）。
     ///
-    /// 全モニタの union 矩形の**下方**へ十分に逃がす。
+    /// **union 矩形の右下、両軸とも画面外へ逃がす。**
     ///
-    /// - 上方（負の方向）へ逃がすとアプリ側で画面内へ引き戻されることがあるので、
-    ///   必ず正方向へ出す。
+    /// ## 片方だけでは隠れない（実測）
+    ///
+    /// macOS は AX で設定した位置を**必ず画面内へ引き戻す**。アプリ側の
+    /// `constrainFrameRect` が働き、要求した座標は次のように丸められる。
+    ///
+    /// | 要求 | 実際（2560×1664 の画面） |
+    /// |---|---|
+    /// | `(0, 101664)` | `(0, 1618)` — **全幅 46pt の帯が画面下に残る** |
+    /// | `(0, -100000)` | `(0, 56)` — メニューバーの下に戻される |
+    /// | `(102560, 101664)` | `(2559, 1618)` — 1pt × 46pt の角だけ |
+    ///
+    /// つまり「画面外へ出す」ことはできず、**残る面積を最小にする**のが限界。
+    /// 両軸を外へ出せば右下隅の 1pt 幅まで追い込める。AeroSpace も同じ位置に落ちる
+    /// （実測で `(2559, 1618)`）。
+    ///
     /// - 寸法 0 の矩形は「そこに画面がある」ことを意味しないので union に混ぜない。
     ///   混ぜると退避先が無意味に遠ざかる。
     ///
@@ -50,8 +63,11 @@ public enum Geometry {
         -> CGPoint
     {
         let union = monitors.filter { !$0.isEmpty }.reduce(CGRect.null) { $0.union($1) }
-        guard !union.isNull else { return CGPoint(x: 0, y: margin) }
-        return CGPoint(x: union.minX, y: union.maxY + margin)
+        guard !union.isNull else { return CGPoint(x: margin, y: margin) }
+        // x は「1pt だけ重ねる」位置を要求する。完全に画面外だと引き戻しが働いて
+        // 40pt 残るので、あえて重ねたほうが隠れる（上の表を参照）。
+        // y は何を要求しても引き戻されるので、遠くへ投げて成り行きに任せる。
+        return CGPoint(x: union.maxX - 1, y: union.maxY + margin)
     }
 
     /// 値をピクセル格子に載せる。`scale` は `backingScaleFactor`（Retina なら 2）。

@@ -157,10 +157,8 @@ struct WorkspaceTests {
 
         // #expect の中で整数式と CGFloat を比べると常に不一致になる。両辺を揃える。
         #expect(origin.y == CGFloat(101_664))
-        #expect(origin.x == 0, "union の左端に揃える")
-        for monitor in monitors {
-            #expect(!monitor.contains(origin))
-        }
+        // x は「1pt だけ重ねる」位置。完全に外へ出すと引き戻されて 40pt 残る（実測）。
+        #expect(origin.x == CGFloat(4479), "union の右端から 1pt 内側")
     }
 
     // 負の方向へ逃がすとアプリ側で画面内へ引き戻されることがある。
@@ -186,5 +184,6 @@ struct WorkspaceTests {
                 CGRect(x: 0, y: 0, width: 100, height: 500),
             ], margin: 1000)
         #expect(origin.y == 1500)
+        #expect(origin.x == 99, "右端 100 の 1pt 内側")
     }
 }
