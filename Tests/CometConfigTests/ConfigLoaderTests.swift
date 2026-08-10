@@ -184,6 +184,23 @@ struct ConfigLoaderTests {
         #expect(configuration.problems.contains { $0.kind == .invalidValue })
     }
 
+    @Test("非表示の方式を読める")
+    func parsesHiddenStrategy() throws {
+        #expect(
+            try ConfigLoader.parse("[workspaces]\nhidden = \"off-screen\"")
+                .hiddenWindowStrategy == .offScreen)
+        #expect(Configuration().hiddenWindowStrategy == .hideApp, "既定はアプリごと非表示")
+        #expect(
+            try ConfigLoader.parse(Configuration.defaultTOML).hiddenWindowStrategy == .hideApp)
+    }
+
+    @Test("非表示の方式が不明なら既定に落とす")
+    func invalidHiddenStrategyIsReported() throws {
+        let configuration = try ConfigLoader.parse("[workspaces]\nhidden = \"minimize\"")
+        #expect(configuration.hiddenWindowStrategy == .hideApp)
+        #expect(configuration.problems.contains { $0.kind == .invalidValue })
+    }
+
     @Test("Phase 4 のつまみを読める")
     func parsesPhase4Options() throws {
         let configuration = try ConfigLoader.parse(

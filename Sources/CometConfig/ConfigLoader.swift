@@ -118,6 +118,18 @@ public enum ConfigLoader {
             }
             configuration.focusFollowsActivation =
                 workspaces.focusFollowsActivation ?? configuration.focusFollowsActivation
+
+            if let value = workspaces.hidden {
+                if let parsed = HiddenWindowStrategy(rawValue: value) {
+                    configuration.hiddenWindowStrategy = parsed
+                } else {
+                    problems.append(
+                        Problem(
+                            kind: .invalidValue,
+                            detail: "[workspaces] hidden の値が不明: \(value)"
+                                + "（候補: \(names(of: HiddenWindowStrategy.allCases))）"))
+                }
+            }
         }
 
         if let value = raw.debug?.logLevel {
@@ -433,10 +445,11 @@ private struct RawWallpaper: Decodable {
 
 private struct RawWorkspaces: Decodable {
     var count: Int?
+    var hidden: String?
     var focusFollowsActivation: Bool?
 
     enum CodingKeys: String, CodingKey {
-        case count
+        case count, hidden
         case focusFollowsActivation = "focus-follows-activation"
     }
 }

@@ -70,6 +70,7 @@ public struct Configuration: Sendable, Equatable {
     public var workspaceCount = 10
     /// 非表示ワークスペースのウィンドウがアクティブになったらそちらへ移るか。
     public var focusFollowsActivation = true
+    public var hiddenWindowStrategy = HiddenWindowStrategy.hideApp
     /// 設定に書かれていなければ `nil`。コマンドライン引数の指定を上書きしないため。
     public var logLevel: LogLevel?
     public var performance = PerformanceOptions()
@@ -119,6 +120,15 @@ public struct Configuration: Sendable, Equatable {
 
         [workspaces]
         count = 10
+
+        # 非表示ワークスペースのウィンドウの隠し方
+        #   "hide-app"   アプリごと非表示にする（Cmd+H 相当）。完全に消え、
+        #                Mission Control にも出ない。ただし粒度がアプリ単位なので、
+        #                表示中のワークスペースにもウィンドウを持つアプリは
+        #                自動的に隅寄せへ落ちる
+        #   "off-screen" 画面の隅へ追い込む。1pt × 46pt の角が残る
+        #                （macOS はウィンドウを画面外へ出させない）
+        hidden = "hide-app"
 
         # 非表示ワークスペースのウィンドウが Cmd+Tab などでアクティブになったら
         # そのワークスペースへ移る。切ると「アプリは前面だが見えない」状態になる。

@@ -226,6 +226,7 @@ engine.insertionStrategy = configuration.insertionStrategy
 engine.defaultOrientation = configuration.defaultOrientation
 engine.windowRules = configuration.windowRules
 engine.focusFollowsActivation = configuration.focusFollowsActivation
+engine.hiddenWindowStrategy = configuration.hiddenWindowStrategy
 
 // MARK: - 内蔵UI
 //
@@ -386,6 +387,7 @@ func reloadConfiguration() {
     engine.defaultOrientation = reloaded.defaultOrientation
     engine.windowRules = reloaded.windowRules
     engine.focusFollowsActivation = reloaded.focusFollowsActivation
+    engine.hiddenWindowStrategy = reloaded.hiddenWindowStrategy
 
     decoration.border.style = reloaded.border
     decoration.indicator.style = reloaded.indicator

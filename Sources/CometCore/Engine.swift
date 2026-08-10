@@ -114,6 +114,12 @@ public final class Engine: WindowResolving {
     public var defaultOrientation = DefaultOrientation.auto
     /// ウィンドウルール。**初めて見るウィンドウにだけ**当てる。
     public var windowRules: [WindowRule] = []
+    /// 非表示ワークスペースのウィンドウの隠し方。
+    ///
+    /// `hide-app` は完全に消える代わりに粒度がアプリ単位。表示中のワークスペースにも
+    /// ウィンドウを持つアプリは自動的に隅寄せへ落ちる。
+    public var hiddenWindowStrategy = HiddenWindowStrategy.hideApp
+
     /// 非表示ワークスペースのウィンドウがアクティブになったら、そちらへ移るか。
     ///
     /// 画面外退避方式では Cmd+Tab や Dock から非表示のウィンドウを選べてしまい、
@@ -210,7 +216,12 @@ public final class Engine: WindowResolving {
             parts.append("ウィンドウなし")
         }
         if !stashedFrames.isEmpty {
-            parts.append("退避 \(stashedFrames.count) 枚")
+            parts.append("隅寄せ \(stashedFrames.count) 枚")
+        }
+        let hidden = Set(registry.allIDs.compactMap { registry[$0]?.pid })
+            .filter { NSRunningApplication(processIdentifier: $0)?.isHidden == true }
+        if !hidden.isEmpty {
+            parts.append("非表示アプリ \(hidden.count) 個")
         }
         return parts.joined(separator: " | ")
     }
@@ -1333,9 +1344,15 @@ public final class Engine: WindowResolving {
         into targets: inout [CGWindowID: TargetFrame],
         order: inout [CGWindowID]
     ) {
+        // アプリごと隠せるものは隠す。**隅に 1pt も残らない**のでこちらが本命。
+        // 隠せない（表示中のウィンドウも持つ）アプリのぶんだけ隅へ寄せる。
+        let plan = hidePlan(activeID: activeID)
+        applyHidePlan(plan)
+
         let stash = stashOrigin()
+        let stashable = Set(plan.stash)
         for workspace in workspaces.all where workspace.id != activeID {
-            for id in registry.visibleIDs(in: workspace.id) {
+            for id in registry.visibleIDs(in: workspace.id) where stashable.contains(id) {
                 // 初めて退避するときの矩形を覚える。退避すると `observedFrame` は
                 // 退避先で上書きされ、元の位置が分からなくなる。
                 if stashedFrames[id] == nil {
@@ -1364,6 +1381,65 @@ public final class Engine: WindowResolving {
         Geometry.stashOrigin(outside: monitors.monitors.map(\.frame))
     }
 
+    /// どのアプリを隠し、どのウィンドウを隅へ寄せるかを決める。
+    ///
+    /// 「今どのアプリが非表示か」は**自分の記録ではなく macOS の実態**を見る。
+    /// 利用者が Cmd+Tab で戻したときに追従できるようにするため。
+    private func hidePlan(activeID: WorkspaceID) -> HidePlanner.Plan {
+        var windows: [HidePlanner.Window] = []
+        var hiddenApps: Set<pid_t> = []
+
+        for id in registry.allIDs {
+            guard let record = registry[id],
+                record.disposition.isTiled || record.disposition.isFloating
+            else { continue }
+            windows.append(
+                HidePlanner.Window(id: id, pid: record.pid, workspace: record.workspace))
+            if NSRunningApplication(processIdentifier: record.pid)?.isHidden == true {
+                hiddenApps.insert(record.pid)
+            }
+        }
+
+        return HidePlanner.plan(
+            windows: windows, activeWorkspace: activeID, hiddenApps: hiddenApps,
+            strategy: hiddenWindowStrategy)
+    }
+
+    /// アプリの表示・非表示を切り替える。
+    ///
+    /// `NSRunningApplication` の操作はローカル処理なので AX の往復は要らない。
+    /// **隠す前に表示へ戻すほうを先に**行う。順序が逆だと、表示すべきウィンドウが
+    /// 一瞬も出ないまま次の非表示に巻き込まれることがある。
+    private func applyHidePlan(_ plan: HidePlanner.Plan) {
+        for pid in plan.unhide {
+            guard let app = NSRunningApplication(processIdentifier: pid) else { continue }
+            app.unhide()
+            log.debug("アプリを表示に戻した pid=\(pid)")
+        }
+        for pid in plan.hide {
+            guard let app = NSRunningApplication(processIdentifier: pid) else { continue }
+            app.hide()
+            log.debug("アプリを非表示にした pid=\(pid)")
+        }
+    }
+
+    /// 隠したアプリを全て表示へ戻す。**終了前に呼ぶこと。**
+    ///
+    /// 戻さずに終了すると、利用者からは「アプリが消えた」ようにしか見えない。
+    /// - Returns: 戻したアプリの数。
+    @discardableResult
+    public func unhideAllApplications() -> Int {
+        var restored = 0
+        for pid in Set(registry.allIDs.compactMap { registry[$0]?.pid }) {
+            guard let app = NSRunningApplication(processIdentifier: pid), app.isHidden else {
+                continue
+            }
+            app.unhide()
+            restored += 1
+        }
+        return restored
+    }
+
     private func logDryRun(targets: [CGWindowID: TargetFrame], order: [CGWindowID]) {
         log.info("[dry-run] ワークスペース \(workspaces.activeID) / \(order.count) 枚の配置を計算した")
         for id in order {
@@ -1387,6 +1463,10 @@ public final class Engine: WindowResolving {
     @discardableResult
     public func prepareForTermination() -> Int {
         let restored = restoreStashedWindows()
+        let unhidden = unhideAllApplications()
+        if unhidden > 0 {
+            log.info("非表示にしていた \(unhidden) 個のアプリを表示に戻した")
+        }
         let enhanced = observerHub.restoreEnhancedUserInterfaceForAll()
         if enhanced > 0 {
             log.debug("AXEnhancedUserInterface を \(enhanced) 個のアプリで戻した")
