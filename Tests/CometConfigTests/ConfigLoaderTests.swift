@@ -184,6 +184,71 @@ struct ConfigLoaderTests {
         #expect(configuration.problems.contains { $0.kind == .invalidValue })
     }
 
+    @Test("Phase 4 のつまみを読める")
+    func parsesPhase4Options() throws {
+        let configuration = try ConfigLoader.parse(
+            """
+            [workspaces]
+            focus-follows-activation = false
+
+            [performance]
+            disable-enhanced-ui = false
+
+            [debug]
+            timing = true
+            """)
+
+        #expect(configuration.focusFollowsActivation == false)
+        #expect(configuration.performance.disablesEnhancedUserInterface == false)
+        #expect(configuration.performance.isTimingEnabled)
+    }
+
+    // セクションの有無で他のセクションの読み取りが変わってはいけない。
+    @Test("timing は performance が無くても読める")
+    func timingIsIndependentOfPerformanceSection() throws {
+        let configuration = try ConfigLoader.parse("[debug]\ntiming = true")
+        #expect(configuration.performance.isTimingEnabled)
+        #expect(configuration.performance.axTimeout == 0.1, "他の値は既定のまま")
+    }
+
+    @Test("performance だけ書いても timing の既定は保たれる")
+    func performanceAloneKeepsTimingDefault() throws {
+        let configuration = try ConfigLoader.parse("[performance]\nax-timeout-ms = 200")
+        #expect(configuration.performance.axTimeout == 0.2)
+        #expect(!configuration.performance.isTimingEnabled)
+    }
+
+    // 設定ファイルは既定を置き換える。`[gaps]` だけ書いてキーが全部死ぬのは
+    // 分かりにくいので必ず知らせる。
+    @Test("バインドが1つも無ければ問題として記録する")
+    func emptyBindingsAreReported() throws {
+        let configuration = try ConfigLoader.parse("[gaps]\ninner-horizontal = 3")
+        #expect(configuration.bindings.isEmpty)
+        #expect(configuration.problems.contains { $0.kind == .noBindings })
+    }
+
+    @Test("既定の設定にはバインドの警告が出ない")
+    func builtInHasBindings() throws {
+        let configuration = try ConfigLoader.parse(Configuration.defaultTOML)
+        #expect(!configuration.problems.contains { $0.kind == .noBindings })
+    }
+
+    @Test("Phase 4 のつまみの既定値")
+    func phase4Defaults() {
+        let fallback = Configuration()
+        #expect(fallback.focusFollowsActivation, "既定で追従する")
+        #expect(fallback.performance.disablesEnhancedUserInterface, "既定で無効化する")
+        #expect(!fallback.performance.isTimingEnabled, "計測は既定で切る")
+    }
+
+    @Test("既定の設定は Phase 4 のつまみを明示している")
+    func builtInConfigurationDocumentsPhase4Options() throws {
+        let configuration = try ConfigLoader.parse(Configuration.defaultTOML)
+        #expect(configuration.focusFollowsActivation)
+        #expect(configuration.performance.disablesEnhancedUserInterface)
+        #expect(!configuration.performance.isTimingEnabled)
+    }
+
     // 負のギャップは配置を破壊する（境界が領域の外に出てウィンドウが重なる）。
     // 設定の打ち間違いで壊れた配置にならないよう、下限で止める。
     @Test("負のギャップは 0 に丸めて問題として記録する")

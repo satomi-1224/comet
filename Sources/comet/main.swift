@@ -218,7 +218,12 @@ engine.normalization = configuration.normalization
 engine.insertionStrategy = configuration.insertionStrategy
 engine.defaultOrientation = configuration.defaultOrientation
 engine.windowRules = configuration.windowRules
+engine.focusFollowsActivation = configuration.focusFollowsActivation
 engine.start()
+
+if engine.isTimingEnabled {
+    log.info("計測が有効。ctrl-alt-shift-t で適用レイテンシを出力する")
+}
 
 // MARK: - 設定によるホットキー
 
@@ -256,15 +261,21 @@ func registerControlHotkey(_ spec: String, label: String, action: @escaping @Mai
     }
 }
 
-// 終了前に退避中のウィンドウを画面へ戻す。
+// 終了前に AX で変えたものを元に戻す。
 //
-// 戻さずに終了すると、非表示ワークスペースのウィンドウが画面外に残ったままになり、
-// 利用者からは「ウィンドウが消えた」ようにしか見えない。AX の適用は非同期なので
-// 少しだけ待つ。待ち時間には上限を置く（応答しないアプリで終われなくなるのを防ぐ）。
+// 退避中のウィンドウを画面へ、無効化した AXEnhancedUserInterface を有効へ。
+// 戻さずに終了すると、利用者からは「ウィンドウが消えた」ようにしか見えない。
+// AX の適用は非同期なので少しだけ待つ。待ち時間には上限を置く
+//（応答しないアプリで終われなくなるのを防ぐ）。
 @MainActor
 func terminateAfterRestoringWindows(reason: String) {
     Log.shared.info(reason)
-    let restored = engine.restoreStashedWindows()
+    if engine.isTimingEnabled {
+        for line in engine.timingReport {
+            Log.shared.info("計測: \(line)")
+        }
+    }
+    let restored = engine.prepareForTermination()
     guard restored > 0 else {
         NSApp.terminate(nil)
         return
@@ -279,11 +290,52 @@ registerControlHotkey("ctrl-alt-shift-q", label: "終了") {
     terminateAfterRestoringWindows(reason: "終了ホットキーを受信した")
 }
 
+registerControlHotkey("ctrl-alt-shift-t", label: "計測の出力") {
+    let lines = engine.timingReport
+    guard !lines.isEmpty else {
+        Log.shared.info(
+            engine.isTimingEnabled
+                ? "計測: まだ記録が無い" : "計測は無効（設定に [debug] timing = true を書く）")
+        return
+    }
+    Log.shared.info("計測: 適用レイテンシ")
+    for line in lines {
+        Log.shared.info("  \(line)")
+    }
+}
+
 registerControlHotkey("ctrl-alt-shift-r", label: "再配置") {
     // 全ワークスペースの状態も出す。配置がおかしいときに、レイアウト計算・
     // ツリーの組み方・所属ワークスペース・退避のどこがずれているのかを切り分けられる。
     Log.shared.info("再配置を要求された: \(engine.stateDescription)")
     engine.relayout()
+}
+
+// MARK: - 起動後に実行するコマンド
+
+// ホットキーを押せない環境でもコマンドの経路を通せるようにする検証用の口。
+// 走査が一巡してから流し、1つごとに状態を出して結果を追えるようにする。
+if !options.commands.isEmpty {
+    let specs = options.commands
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+        MainActor.assumeIsolated {
+            log.info("--run: \(specs.count) 件のコマンドを流す")
+            log.info("--run: 開始時の状態 \(engine.stateDescription)")
+            for (index, spec) in specs.enumerated() {
+                DispatchQueue.main.asyncAfter(deadline: .now() + Double(index) * 0.3) {
+                    MainActor.assumeIsolated {
+                        do {
+                            let command = try Command.parse(spec)
+                            engine.execute(command)
+                            log.info("--run: \(command) → \(engine.stateDescription)")
+                        } catch {
+                            log.error("--run: \"\(spec)\" を解釈できない: \(error)")
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 // MARK: - シグナル

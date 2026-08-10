@@ -12,6 +12,15 @@ public protocol WindowResolving: AnyObject {
     func pid(for id: CGWindowID) -> pid_t?
     func observedFrame(for id: CGWindowID) -> CGRect?
     func didApply(_ id: CGWindowID, target: CGRect, observed: CGRect?, succeeded: Bool)
+    /// 補正の上限に達しても目標へ追従しなかった。
+    ///
+    /// 「AX でのリサイズを無視するアプリ」を検出できる唯一の合図（設計書 §12.4）。
+    func didGiveUp(_ id: CGWindowID, target: CGRect, observed: CGRect)
+}
+
+extension WindowResolving {
+    /// 既定では何もしない。降格の判断は `Engine` の仕事。
+    public func didGiveUp(_ id: CGWindowID, target: CGRect, observed: CGRect) {}
 }
 
 /// ``FrameCoalescer`` を時間軸に載せ、PID ごとのキューへ振り分ける薄いラッパ。
@@ -30,6 +39,14 @@ public final class FrameScheduler {
     private let interval: TimeInterval
     private let tolerance: CGFloat
     private let maxCorrections: Int
+    /// 適用のレイテンシ。無効なら何も測らない。
+    public let timing: TimingRecorder
+
+    /// 目標を受け取るが **AX には一切書き込まない。**
+    ///
+    /// 呼び出し側で「投入しない」ようにすると経路が増えたときに必ず漏れる
+    ///（実際に外部変更の戻し経路から漏れていた）。**関門はここ一箇所に置く。**
+    public var isDryRun = false
     private let log: Log
 
     private var isTicking = false
@@ -43,8 +60,10 @@ public final class FrameScheduler {
         interval: TimeInterval = 0.008,
         tolerance: CGFloat = 0.5,
         maxCorrections: Int = 3,
+        timing: TimingRecorder = TimingRecorder(isEnabled: false),
         log: Log = .shared
     ) {
+        self.timing = timing
         self.applierPool = applierPool
         self.interval = interval
         self.tolerance = tolerance
@@ -123,10 +142,17 @@ public final class FrameScheduler {
         let id = request.windowID
         let target = request.target
 
+        guard !isDryRun else {
+            // 適用したことにして先へ進める。読み戻しも補正も学習もしない。
+            coalescer.complete(id)
+            return
+        }
+
+        let timing = self.timing
         applierPool.queue(for: pid).async {
             let result = AXBridge.applyFrame(
                 target.rect, setSize: target.setSize, verify: target.verify,
-                current: current, to: element.raw)
+                current: current, to: element.raw, timing: timing, pid: pid)
             Task { @MainActor in
                 self.finish(id, target: target, result: result)
             }
@@ -196,6 +222,7 @@ public final class FrameScheduler {
                 "[\(id)] が目標に追従しない。要求 \(rendered(target.rect)) / 実際 \(rendered(observed))。"
                     + "\(maxCorrections) 回の補正で一致しなかったため諦める（アプリ側の制約と思われる）")
             corrections.removeValue(forKey: id)
+            resolver?.didGiveUp(id, target: target.rect, observed: observed)
             return
         }
 

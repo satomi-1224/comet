@@ -41,6 +41,8 @@ public struct Problem: Sendable, Equatable, CustomStringConvertible {
         case unsupportedMode
         /// 設定ファイルそのものを読めない。
         case unreadable
+        /// キーバインドが1つも無い。
+        case noBindings
     }
 
     public let kind: Kind
@@ -62,6 +64,8 @@ public struct Configuration: Sendable, Equatable {
     public var insertionStrategy = TreeSync.InsertionStrategy.split
     public var defaultOrientation = DefaultOrientation.auto
     public var workspaceCount = 10
+    /// 非表示ワークスペースのウィンドウがアクティブになったらそちらへ移るか。
+    public var focusFollowsActivation = true
     /// 設定に書かれていなければ `nil`。コマンドライン引数の指定を上書きしないため。
     public var logLevel: LogLevel?
     public var performance = PerformanceOptions()
@@ -102,6 +106,10 @@ public struct Configuration: Sendable, Equatable {
         [workspaces]
         count = 10
 
+        # 非表示ワークスペースのウィンドウが Cmd+Tab などでアクティブになったら
+        # そのワークスペースへ移る。切ると「アプリは前面だが見えない」状態になる。
+        focus-follows-activation = true
+
         [gaps]
         inner-horizontal = 5
         inner-vertical   = 5
@@ -115,9 +123,16 @@ public struct Configuration: Sendable, Equatable {
         apply-interval-ms      = 8
         max-correction-retries = 3
 
+        # ウィンドウ操作を遅くする AXEnhancedUserInterface を無効化する。
+        # VoiceOver を併用するなら false にする。
+        disable-enhanced-ui = true
+
         [debug]
         # "trace" | "debug" | "info" | "warn" | "error" | "off"
         log-level = "info"
+
+        # 適用のレイテンシをアプリ別に集計する。ctrl-alt-shift-t で出力。
+        timing = false
 
         # ---- キーバインド ----
         #

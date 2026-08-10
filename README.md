@@ -7,12 +7,14 @@ Swift 製の単一プロセスに置き換えることを目的とする。
 
 ## 現在の状態
 
-**Phase 3（ワークスペース）まで実装済み。**
+**Phase 4（高速化の詰めと堅牢性）まで実装済み。**
 
 - ウィンドウを開くと自動でタイルされ、閉じると再配置される
 - `focus` / `move` / `resize` / `join-with` / `layout` が動く
 - ワークスペース 10 個。`alt-1`..`alt-0` で切替、`alt-shift-1`..で移動して追従、`alt-tab` で直前へ
 - 設定ファイル（`~/.config/comet/config.toml`）でギャップ・キーバインド・ウィンドウルールを変えられる
+- 寸法を無視するアプリは自動でフローティングへ降格する
+- `[debug] timing = true` + `ctrl-alt-shift-t` でアプリ別の適用レイテンシが出る
 - 内蔵 UI（フォーカス枠線・ワークスペースインジケータ・壁紙）はまだ**未実装**
 
 進捗の詳細は [PROGRESS.md](PROGRESS.md)。
@@ -53,6 +55,7 @@ log stream --predicate 'subsystem == "local.comet"'
 | `--print-default-config` | 組み込みの既定設定を出力して終了。設定ファイルの雛形になる |
 | `--preview-layout <n>` | n 枚のときの配置を図示して終了。**ウィンドウには一切触れない** |
 | `--dry-run` | 配置を計算するがウィンドウは動かさない。他の WM が動いている環境での検証用 |
+| `--run <command>` | 起動後にコマンドを実行する。複数回指定可。ホットキーを押せない環境での検証用 |
 | `--hotkey <spec>` | 押下をログに出すだけの確認用ホットキー。複数回指定可 |
 | `--print-keys` | 指定できるキー名を一覧表示 |
 | `--help` | ヘルプ |
@@ -63,6 +66,7 @@ log stream --predicate 'subsystem == "local.comet"'
 |---|---|
 | `ctrl-alt-shift-q` | 終了 |
 | `ctrl-alt-shift-r` | 再配置（全ワークスペースの状態をログに出す） |
+| `ctrl-alt-shift-t` | 適用レイテンシの出力（`[debug] timing = true` のとき） |
 
 ホットキーの書式は `alt-shift-h` のように修飾キーとキーをハイフンで連ねる。
 修飾キーは `cmd` / `alt` / `ctrl` / `shift`（別名 `command` / `opt` / `option` / `control`）。

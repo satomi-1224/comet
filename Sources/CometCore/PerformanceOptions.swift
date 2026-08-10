@@ -15,13 +15,23 @@ public struct PerformanceOptions: Sendable, Equatable {
     /// 目標とずれた場合に投げ直す回数の上限。
     public var maxCorrections: Int
 
+    /// ウィンドウ操作を遅くする `AXEnhancedUserInterface` を無効化するか。
+    public var disablesEnhancedUserInterface: Bool
+
+    /// 適用のレイテンシをアプリ別に集計するか（設計書 §11.3）。
+    public var isTimingEnabled: Bool
+
     public init(
         axTimeout: TimeInterval = 0.1,
         applyInterval: TimeInterval = 0.008,
-        maxCorrections: Int = 3
+        maxCorrections: Int = 3,
+        disablesEnhancedUserInterface: Bool = true,
+        isTimingEnabled: Bool = false
     ) {
         self.axTimeout = axTimeout
         self.applyInterval = applyInterval
         self.maxCorrections = maxCorrections
+        self.disablesEnhancedUserInterface = disablesEnhancedUserInterface
+        self.isTimingEnabled = isTimingEnabled
     }
 }

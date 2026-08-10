@@ -75,6 +75,12 @@ public final class Engine: WindowResolving {
     /// 表示中のワークスペースのルート。
     private var root: ContainerNode { workspaces.active.root }
 
+    /// 初回配置を待たせないウィンドウ。**症状A（デフォルト位置に一瞬出る）の対策。**
+    ///
+    /// SIP 有効下では他プロセスのウィンドウの初回描画を止められないので、
+    /// 「通知を受けてから適用が終わるまで」を短くするしかない（設計書 §3.2）。
+    private var priorityWindows: Set<CGWindowID> = []
+
     /// 再配置のあとにフォーカスを戻すべきワークスペース。
     ///
     /// 切替では**目標矩形を積んだあと**にフォーカスを動かす必要がある。
@@ -108,6 +114,17 @@ public final class Engine: WindowResolving {
     public var defaultOrientation = DefaultOrientation.auto
     /// ウィンドウルール。**初めて見るウィンドウにだけ**当てる。
     public var windowRules: [WindowRule] = []
+    /// 非表示ワークスペースのウィンドウがアクティブになったら、そちらへ移るか。
+    ///
+    /// 画面外退避方式では Cmd+Tab や Dock から非表示のウィンドウを選べてしまい、
+    /// 「アプリは前面だがウィンドウが見えない」状態になる（設計書 §12.6）。
+    public var focusFollowsActivation = true
+    /// 追従を諦めたウィンドウをフローティングへ降格させる、ずれの下限。
+    ///
+    /// 文字セル単位への丸め（WezTerm）や最小寸法は数十 pt のずれで収まる。
+    /// これを降格の対象にすると常用しているウィンドウが勝手に浮くので、
+    /// **「明らかに無視している」大きさだけを対象にする**。
+    public var floatingDemotionThreshold: CGFloat = 50
     public var gaps: Gaps
     /// レイアウトを計算するがウィンドウは動かさない。
     /// 他の WM が動いている環境でも安全に検証できるようにするための逃げ道。
@@ -126,12 +143,17 @@ public final class Engine: WindowResolving {
         self.log = log
         let pool = ApplierPool()
         self.applierPool = pool
-        self.observerHub = AXObserverHub(
+        let hub = AXObserverHub(
             applierPool: pool, messagingTimeout: Float(performance.axTimeout), log: log)
+        hub.disablesEnhancedUserInterface = performance.disablesEnhancedUserInterface
+        self.observerHub = hub
         self.monitors = MonitorManager(log: log)
-        self.scheduler = FrameScheduler(
+        let scheduler = FrameScheduler(
             applierPool: pool, interval: performance.applyInterval,
-            maxCorrections: performance.maxCorrections, log: log)
+            maxCorrections: performance.maxCorrections,
+            timing: TimingRecorder(isEnabled: performance.isTimingEnabled), log: log)
+        scheduler.isDryRun = dryRun
+        self.scheduler = scheduler
     }
 
     public var managedWindowCount: Int { registry.count }
@@ -139,6 +161,14 @@ public final class Engine: WindowResolving {
     /// 表示中のワークスペースとツリーの形。`1: H[1, V[2, 3]]` の記法で返る。診断用。
     public var treeDescription: String { "\(workspaces.activeID): \(root)" }
     public var activeWorkspaceID: WorkspaceID { workspaces.activeID }
+
+    /// 適用のレイテンシをアプリ別に整形した行。`[debug] timing = true` のときだけ中身が入る。
+    ///
+    /// **「どのアプリが足を引っ張っているか」がここで分かる**（設計書 §11.3）。
+    public var timingReport: [String] {
+        scheduler.timing.report { NSRunningApplication(processIdentifier: $0)?.localizedName }
+    }
+    public var isTimingEnabled: Bool { scheduler.timing.isEnabled }
 
     /// 全ワークスペースの状態。**配置がおかしいときの最初の手がかり。**
     ///
@@ -363,6 +393,7 @@ public final class Engine: WindowResolving {
             minimumSizes.removeValue(forKey: id)
             desiredFrames.removeValue(forKey: id)
             stashedFrames.removeValue(forKey: id)
+            priorityWindows.remove(id)
             restoreAttempts.removeValue(forKey: id)
         }
         observerHub.detach(pid: pid)
@@ -398,7 +429,9 @@ public final class Engine: WindowResolving {
         return .floating
     }
 
-    private func register(_ windows: [DiscoveredWindow], pid: pid_t, bundleID: String?) {
+    private func register(
+        _ windows: [DiscoveredWindow], pid: pid_t, bundleID: String?, immediately: Bool = false
+    ) {
         guard !windows.isEmpty else { return }
 
         for window in windows {
@@ -439,7 +472,7 @@ public final class Engine: WindowResolving {
                 log.trace("除外 [\(window.id)] \(title): \(reason)")
             }
         }
-        relayout()
+        relayout(immediately: immediately)
     }
 
     // MARK: - イベント
@@ -493,8 +526,24 @@ public final class Engine: WindowResolving {
             Task { @MainActor in
                 guard let id else { return }
                 self.noteFocused(id)
+                self.followActivationIfNeeded(id)
             }
         }
+    }
+
+    /// 非表示ワークスペースのウィンドウがアクティブになったら、そちらへ移る。
+    ///
+    /// 画面外退避方式では Cmd+Tab や Dock から非表示のウィンドウを選べてしまう。
+    /// 何もしないと「アプリは前面だがウィンドウが見えない」状態になる（設計書 §12.6）。
+    private func followActivationIfNeeded(_ id: CGWindowID) {
+        guard focusFollowsActivation,
+            let workspace = registry[id]?.workspace,
+            workspace != workspaces.activeID,
+            workspaces[workspace] != nil
+        else { return }
+
+        log.info("[\(id)] がアクティブになったのでワークスペース \(workspace) へ移る")
+        switchWorkspace(to: .index(workspace))
     }
 
     private func noteFocused(_ id: CGWindowID) {
@@ -620,7 +669,11 @@ public final class Engine: WindowResolving {
         guard switched else { return }
 
         // 離脱側のフォーカスを保存する。戻ってきたときにここへ返す。
-        outgoing.lastFocused = focusedWindowID
+        // 他のワークスペースのウィンドウを覚えても意味がないので絞る
+        //（focus_follows_activation ではこの状況が普通に起きる）。
+        if let focused = focusedWindowID, registry[focused]?.workspace == outgoing.id {
+            outgoing.lastFocused = focused
+        }
         let incoming = workspaces.active
         isRestoringWorkspace = true
 
@@ -744,7 +797,10 @@ public final class Engine: WindowResolving {
             let discovered = DiscoveredWindow(id: id, element: element, attributes: attributes)
             Task { @MainActor in
                 let bundleID = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
-                self.register([discovered], pid: pid, bundleID: bundleID)
+                // 新しいウィンドウの初回配置は待たせない。**症状A の対策。**
+                // 適用順の先頭に回し、次のランループを待たずにその場で配置する。
+                self.priorityWindows.insert(id)
+                self.register([discovered], pid: pid, bundleID: bundleID, immediately: true)
             }
         }
     }
@@ -1006,6 +1062,7 @@ public final class Engine: WindowResolving {
         minimumSizes.removeValue(forKey: id)
         desiredFrames.removeValue(forKey: id)
         stashedFrames.removeValue(forKey: id)
+        priorityWindows.remove(id)
         restoreAttempts.removeValue(forKey: id)
         observerHub.unobserve(window: element)
         log.debug("削除 [\(id)]")
@@ -1019,11 +1076,19 @@ public final class Engine: WindowResolving {
     /// 実際の算出は次のランループまで遅延させ、**1回にまとめる**。
     /// 起動時は各アプリの走査が個別に完了するため、そのたびに配置すると
     /// 1枚→2枚→3枚…と段階的に動いてカスケードが目に見える。
-    public func relayout() {
+    /// - Parameter immediately: 次のランループを待たずにその場で配置する。
+    ///   新規ウィンドウの初回配置（症状A）だけに使う。まとめる利点より
+    ///   1ランループ分の遅れを削るほうが効く。
+    public func relayout(immediately: Bool = false) {
         // 起動時は各アプリの走査が別々のランループターンで返るため、
         // そのたびに配置すると 1枚→2枚→3枚… と段階的に動いてカスケードが目に見える。
         // 走査が一巡するまで配置を保留し、揃ってから一度だけ行う。
         guard hasFinishedInitialAdoption else { return }
+
+        if immediately {
+            performRelayout()
+            return
+        }
         guard !isRelayoutScheduled else { return }
         isRelayoutScheduled = true
         DispatchQueue.main.async { [weak self] in
@@ -1090,6 +1155,15 @@ public final class Engine: WindowResolving {
         guard !isDryRun else {
             logDryRun(targets: targets, order: order)
             return
+        }
+        // 新規ウィンドウを先頭へ回す。デフォルト位置に出ている時間がそのまま
+        // ちらつきとして見えるので、他より先に動かす（症状A）。
+        if !priorityWindows.isEmpty {
+            let priority = priorityWindows
+            order =
+                order.filter { priority.contains($0) } + order.filter { !priority.contains($0) }
+            // 配置できたものだけ役目を終える。潰れて送れなかったものは次も先頭に回す。
+            priorityWindows.subtract(order)
         }
         if !targets.isEmpty {
             scheduler.submit(targets, order: order)
@@ -1227,6 +1301,23 @@ public final class Engine: WindowResolving {
         }
     }
 
+    /// 終了前の後片付け。
+    ///
+    /// **AX で変えたものは元に戻して終わる。** comet を止めたあとに
+    /// 「ウィンドウが画面外に残る」「支援技術向けの挙動が無効なまま」といった
+    /// 痕跡を残さないため。
+    ///
+    /// - Returns: 画面へ戻すウィンドウの枚数。呼び出し側は適用の完了を少し待つ必要がある。
+    @discardableResult
+    public func prepareForTermination() -> Int {
+        let restored = restoreStashedWindows()
+        let enhanced = observerHub.restoreEnhancedUserInterfaceForAll()
+        if enhanced > 0 {
+            log.debug("AXEnhancedUserInterface を \(enhanced) 個のアプリで戻した")
+        }
+        return restored
+    }
+
     /// 退避中のウィンドウを画面へ戻す。**終了前に呼ぶこと。**
     ///
     /// 戻さずに終了すると、非表示ワークスペースのウィンドウが画面外に残る。
@@ -1246,7 +1337,6 @@ public final class Engine: WindowResolving {
             order.append(id)
         }
         stashedFrames.removeAll()
-        guard !isDryRun else { return order.count }
         scheduler.submit(targets, order: order)
         return order.count
     }
@@ -1267,6 +1357,34 @@ public final class Engine: WindowResolving {
 
         guard let observed else { return }
         learnMinimum(id, target: target, observed: observed)
+    }
+
+    /// 補正の上限に達しても追従しなかった。**AX を無視するアプリの自動検出。**
+    ///
+    /// ずれが小さいものは降格させない。文字セル単位への丸めや最小寸法は
+    /// 数十 pt で収まるので、それで常用ウィンドウが浮くと驚く。
+    /// 大きくずれているものだけを対象にし、恒久的な対処（`window-rule`）を案内する。
+    public func didGiveUp(_ id: CGWindowID, target: CGRect, observed: CGRect) {
+        let gap = max(
+            abs(observed.width - target.width), abs(observed.height - target.height))
+        guard gap > floatingDemotionThreshold, registry[id]?.disposition.isTiled == true else {
+            return
+        }
+
+        let record = registry[id]
+        registry.update(id) { $0.disposition = .floating }
+        desiredFrames.removeValue(forKey: id)
+        log.warn(
+            """
+            [\(id)] \(record?.title?.prefix(40) ?? "?") が指定した寸法を無視するので
+            フローティングへ降格した（要求 \(Int(target.width))x\(Int(target.height)) /
+            実際 \(Int(observed.width))x\(Int(observed.height))）。
+            毎回こうなるなら設定に書いておくと安定する:
+              [[window-rule]]
+              if-app-id = "\(record?.bundleID ?? "?")"
+              run       = "layout floating"
+            """)
+        relayout()
     }
 
     /// 目標より大きくなった＝アプリ側の下限に当たった。学習してレイアウトに反映する。

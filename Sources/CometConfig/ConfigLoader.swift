@@ -108,10 +108,14 @@ public enum ConfigLoader {
             }
         }
 
-        if let value = raw.workspaces?.count {
-            // 0 個だと有効なワークスペースが存在しない。上限はキーバインドの現実的な数。
-            configuration.workspaceCount = clamped(
-                value, to: 1...36, label: "[workspaces] count", &problems)
+        if let workspaces = raw.workspaces {
+            if let value = workspaces.count {
+                // 0 個だと有効なワークスペースが存在しない。上限はキーバインドの現実的な数。
+                configuration.workspaceCount = clamped(
+                    value, to: 1...36, label: "[workspaces] count", &problems)
+            }
+            configuration.focusFollowsActivation =
+                workspaces.focusFollowsActivation ?? configuration.focusFollowsActivation
         }
 
         if let value = raw.debug?.logLevel {
@@ -140,10 +144,29 @@ public enum ConfigLoader {
                 maxCorrections: performance.maxCorrectionRetries.map {
                     clamped(
                         $0, to: 0...20, label: "[performance] max-correction-retries", &problems)
-                } ?? fallback.maxCorrections)
+                } ?? fallback.maxCorrections,
+                disablesEnhancedUserInterface: performance.disableEnhancedUI
+                    ?? fallback.disablesEnhancedUserInterface,
+                isTimingEnabled: configuration.performance.isTimingEnabled)
+        }
+
+        // `[debug] timing` は `[performance]` の有無に関わらず読む。
+        // 片方のセクションが無いと読まれない、という結び付きを作らない。
+        if let value = raw.debug?.timing {
+            configuration.performance.isTimingEnabled = value
         }
 
         let bindings = parseBindings(raw.mode, problems: &problems)
+        if bindings.isEmpty {
+            // 設定ファイルは既定を**置き換える**。`[gaps]` だけ書いた設定で
+            // 全てのキーが効かなくなるのは分かりにくいので必ず知らせる。
+            problems.append(
+                Problem(
+                    kind: .noBindings,
+                    detail: "[mode.main.binding] が空。設定ファイルは既定を置き換えるので"
+                        + "キーバインドは1つも登録されない"
+                        + "（--print-default-config で全部入りの雛形を出せる）"))
+        }
         configuration.bindings = bindings
         configuration.windowRules = parseWindowRules(raw.windowRule, problems: &problems)
         configuration.problems = problems
@@ -303,6 +326,12 @@ private struct RawConfiguration: Decodable {
 
 private struct RawWorkspaces: Decodable {
     var count: Int?
+    var focusFollowsActivation: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case count
+        case focusFollowsActivation = "focus-follows-activation"
+    }
 }
 
 private struct RawNormalization: Decodable {
@@ -347,19 +376,23 @@ private struct RawPerformance: Decodable {
     var axTimeoutMS: Double?
     var applyIntervalMS: Double?
     var maxCorrectionRetries: Int?
+    var disableEnhancedUI: Bool?
 
     enum CodingKeys: String, CodingKey {
         case axTimeoutMS = "ax-timeout-ms"
         case applyIntervalMS = "apply-interval-ms"
         case maxCorrectionRetries = "max-correction-retries"
+        case disableEnhancedUI = "disable-enhanced-ui"
     }
 }
 
 private struct RawDebug: Decodable {
     var logLevel: String?
+    var timing: Bool?
 
     enum CodingKeys: String, CodingKey {
         case logLevel = "log-level"
+        case timing
     }
 }
 

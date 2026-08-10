@@ -53,6 +53,11 @@ public struct LaunchOptions: Equatable, Sendable {
     public var ignoreConfig: Bool = false
     /// 組み込みの既定設定を出力して終了する。設定ファイルの雛形になる。
     public var printDefaultConfig: Bool = false
+    /// 起動後に実行するコマンド。複数回指定でき、書いた順に実行される。
+    ///
+    /// ホットキーを押せない環境（合成キーの送出に別の権限が要る）でも
+    /// コマンドの経路を通せるようにするための検証用の口。
+    public var commands: [String] = []
 
     public init() {}
 
@@ -77,6 +82,9 @@ public struct LaunchOptions: Equatable, Sendable {
                                 他のウィンドウマネージャが動いている環境での検証用。
           --preview-layout <n>  n 枚のときのレイアウトを図示して終了する。
                                 ウィンドウには一切触れない。
+          --run <command>        起動後にコマンドを実行する。複数回指定でき順に実行する。
+                                例: --run "workspace 2" --run "move left"
+                                ホットキーを押せない環境での検証用。
           --print-keys          指定できるキー名を一覧表示して終了する
           --help, -h            このヘルプを表示して終了する
 
@@ -121,6 +129,8 @@ public struct LaunchOptions: Equatable, Sendable {
                     options.previewLayout = count
                 case "--config":
                     options.configPath = value
+                case "--run":
+                    options.commands.append(value)
                 default:
                     throw LaunchOptionsError.unknownFlag(flag)
                 }
@@ -161,6 +171,9 @@ public struct LaunchOptions: Equatable, Sendable {
 
             case "--config":
                 options.configPath = try takeValue(args, after: &index, flag: arg)
+
+            case "--run":
+                options.commands.append(try takeValue(args, after: &index, flag: arg))
 
             case "--preview-layout":
                 let value = try takeValue(args, after: &index, flag: arg)

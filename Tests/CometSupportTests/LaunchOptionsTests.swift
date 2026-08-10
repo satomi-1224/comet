@@ -29,6 +29,15 @@ struct LaunchOptionsTests {
         #expect(implicit.resolvedLogLevel(configured: .warn) == .warn)
     }
 
+    @Test("--run を複数回指定できる")
+    func runCommands() throws {
+        let options = try LaunchOptions.parse([
+            "--run", "workspace 2", "--run=move left", "--run", "focus right",
+        ])
+        #expect(options.commands == ["workspace 2", "move left", "focus right"])
+        #expect(try LaunchOptions.parse([]).commands.isEmpty)
+    }
+
     @Test("設定ファイルに関するオプションを解釈する")
     func configOptions() throws {
         #expect(try LaunchOptions.parse(["--config", "/tmp/a.toml"]).configPath == "/tmp/a.toml")

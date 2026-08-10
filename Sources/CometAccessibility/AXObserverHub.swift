@@ -75,6 +75,19 @@ public final class AXObserverHub {
     private var observers: [pid_t: AXObserverBox] = [:]
     private var applications: [pid_t: AXElement] = [:]
     private var observedWindows: [AXElement: pid_t] = [:]
+    /// `AXEnhancedUserInterface` を自分で無効化したアプリ。detach と stop で戻す。
+    private var disabledEnhancedUI: Set<pid_t> = []
+
+    /// ウィンドウ操作を遅くする `AXEnhancedUserInterface` を無効化するか。
+    ///
+    /// これが `true` のアプリではリサイズに追加処理やアニメーションが挟まる。
+    /// 皮肉なことに **WM 自身が AX 接続した時点で立つ**ことがあるので、
+    /// 立てたのがこちらなら降ろしてよい（設計書 §3.1 e）。
+    ///
+    /// - Note: 設計書は「操作の直前に落として直後に戻す」としているが、それだと
+    ///   1回の適用につき IPC が2回増える。**管理している間は落としたままにし、
+    ///   手放すときに戻す**方式にした。VoiceOver を併用する場合はここを `false` にする。
+    public var disablesEnhancedUserInterface = true
 
     /// コールバックに渡した自分自身への参照。
     private var retainedSelf: UnsafeMutableRawPointer?
@@ -121,19 +134,47 @@ public final class AXObserverHub {
         let box = AXObserverBox(observer)
         let pointer = SendablePointer(raw: selfPointer())
         let timeout = messagingTimeout
-        applierPool.queue(for: pid).async {
+        let disablesEnhanced = disablesEnhancedUserInterface
+        applierPool.queue(for: pid).async { [weak self] in
             // AXObserverAddNotification は IPC を伴うので PID キュー上で行う。
             // AXObserverCreate とランループ登録はローカル処理なのでメインで済ませてある。
             AXBridge.setMessagingTimeout(timeout, for: application.raw)
             for name in applicationNotifications {
                 AXObserverAddNotification(box.raw, application.raw, name as CFString, pointer.raw)
             }
+
+            guard disablesEnhanced, AXBridge.enhancedUserInterface(of: application.raw) == true
+            else { return }
+            AXBridge.setEnhancedUserInterface(false, on: application.raw)
+            Task { @MainActor in
+                self?.noteEnhancedUserInterfaceDisabled(pid: pid)
+            }
         }
         return true
     }
 
+    private func noteEnhancedUserInterfaceDisabled(pid: pid_t) {
+        guard applications[pid] != nil else {
+            // すでに手放している。読んだ時点の値へ戻す責任は残る。
+            restoreEnhancedUserInterface(pid: pid, application: AXElement(AXUIElementCreateApplication(pid)))
+            return
+        }
+        disabledEnhancedUI.insert(pid)
+        log.debug("AXEnhancedUserInterface を無効化した pid=\(pid)")
+    }
+
+    /// 落とした `AXEnhancedUserInterface` を戻す。
+    private func restoreEnhancedUserInterface(pid: pid_t, application: AXElement) {
+        applierPool.queue(for: pid).async {
+            AXBridge.setEnhancedUserInterface(true, on: application.raw)
+        }
+    }
+
     public func detach(pid: pid_t) {
         guard let observer = observers.removeValue(forKey: pid) else { return }
+        if disabledEnhancedUI.remove(pid) != nil, let application = applications[pid] {
+            restoreEnhancedUserInterface(pid: pid, application: application)
+        }
         applications.removeValue(forKey: pid)
         observedWindows = observedWindows.filter { $0.value != pid }
 
@@ -145,6 +186,21 @@ public final class AXObserverHub {
 
     public func application(for pid: pid_t) -> AXElement? {
         applications[pid]
+    }
+
+    /// 落とした `AXEnhancedUserInterface` を全て戻す。**終了前に呼ぶこと。**
+    ///
+    /// 戻さずに終了すると、支援技術向けの挙動が comet を止めたあとも無効なままになる。
+    /// - Returns: 戻す対象の数。適用は PID キュー上で非同期に進む。
+    @discardableResult
+    public func restoreEnhancedUserInterfaceForAll() -> Int {
+        let targets = disabledEnhancedUI
+        disabledEnhancedUI.removeAll()
+        for pid in targets {
+            let application = applications[pid] ?? AXElement(AXUIElementCreateApplication(pid))
+            restoreEnhancedUserInterface(pid: pid, application: application)
+        }
+        return targets.count
     }
 
     // MARK: - ウィンドウ単位

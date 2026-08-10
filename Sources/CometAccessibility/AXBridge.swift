@@ -1,6 +1,7 @@
 import ApplicationServices
 import CoreGraphics
 import Darwin
+import CometSupport
 
 /// Accessibility API の呼び出しを集約する層。
 ///
@@ -143,6 +144,30 @@ public enum AXBridge {
         return AXPrivate.windowID(of: value as! AXUIElement)
     }
 
+    /// 支援技術向けの非公開属性 `AXEnhancedUserInterface` の値。
+    ///
+    /// これが `true` のアプリでは、ウィンドウのリサイズに追加処理やアニメーションが
+    /// 挟まり `SetAttributeValue` が顕著に遅くなる（設計書 §3.1 e）。
+    /// 皮肉なことに、**支援技術（= WM 自身）が AX 接続した時点で自動的に `true` に
+    /// なる**ことがある。
+    public static func enhancedUserInterface(of application: AXUIElement) -> Bool? {
+        var raw: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(
+                application, AXAttribute.enhancedUserInterface as CFString, &raw) == .success
+        else { return nil }
+        return raw as? Bool
+    }
+
+    @discardableResult
+    public static func setEnhancedUserInterface(_ enabled: Bool, on application: AXUIElement)
+        -> Bool
+    {
+        AXUIElementSetAttributeValue(
+            application, AXAttribute.enhancedUserInterface as CFString,
+            (enabled ? kCFBooleanTrue : kCFBooleanFalse) as CFTypeRef) == .success
+    }
+
     // MARK: - 書き込み
 
     /// ウィンドウを前面に出してフォーカスする。
@@ -186,20 +211,33 @@ public enum AXBridge {
         setSize: Bool,
         verify: Bool = true,
         current: CGRect?,
-        to element: AXUIElement
+        to element: AXUIElement,
+        timing: TimingRecorder? = nil,
+        pid: pid_t = 0
     ) -> FrameApplyResult {
         // 引数名 setSize が静的メソッド setSize(_:on:) を隠すので Self. で明示する。
-        let moved = Self.setPosition(target.origin, on: element)
+        let moved = measured(timing, "setPosition", pid) {
+            Self.setPosition(target.origin, on: element)
+        }
         guard setSize else {
             return FrameApplyResult(succeeded: moved, observed: nil)
         }
-        let sized = Self.setSize(target.size, on: element)
+        let sized = measured(timing, "setSize", pid) { Self.setSize(target.size, on: element) }
 
         // 設定が成功しても、アプリの最小サイズや画面端の制約で実際の矩形は違いうる。
         // 目標どおりに並んでいるかを保証するには読み戻すしかない（1往復）。
         // ドラッグ追従中は往復を削るために省略する。
-        let observed = verify ? Self.readFrame(element) : nil
+        let observed =
+            verify ? measured(timing, "readFrame", pid) { Self.readFrame(element) } : nil
         return FrameApplyResult(succeeded: moved && sized, observed: observed)
+    }
+
+    /// 計測が無効なら余計な処理を挟まずに呼ぶ。
+    private static func measured<T>(
+        _ timing: TimingRecorder?, _ operation: String, _ pid: pid_t, _ body: () -> T
+    ) -> T {
+        guard let timing, timing.isEnabled else { return body() }
+        return timing.measure(operation, pid: pid, body)
     }
 
     /// 適用の結果。
