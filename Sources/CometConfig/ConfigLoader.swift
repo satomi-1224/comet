@@ -156,6 +156,59 @@ public enum ConfigLoader {
             configuration.performance.isTimingEnabled = value
         }
 
+        if let border = raw.border {
+            configuration.border = BorderStyle(
+                isEnabled: border.enabled ?? configuration.border.isEnabled,
+                width: border.width.map {
+                    clamped($0, to: 0...50, label: "[border] width", &problems)
+                } ?? configuration.border.width,
+                radius: border.radius.map {
+                    clamped($0, to: 0...100, label: "[border] radius", &problems)
+                } ?? configuration.border.radius,
+                focusedColor: color(
+                    border.colorFocused, "[border] color-focused", &problems)
+                    ?? configuration.border.focusedColor)
+
+            // 「タイル全部に枠を描く」は未対応。書いてあるのに効かないと分からないので伝える。
+            if border.colorUnfocused != nil {
+                problems.append(
+                    Problem(
+                        kind: .unsupportedOption,
+                        detail: "[border] color-unfocused はまだ未対応（フォーカス中だけに枠を描く）"))
+            }
+        }
+
+        if let indicator = raw.indicator {
+            if let value = indicator.style {
+                if let parsed = IndicatorStyle(rawValue: value) {
+                    configuration.indicator = parsed
+                } else {
+                    problems.append(
+                        Problem(
+                            kind: .invalidValue,
+                            detail: "[indicator] style の値が不明: \(value)"
+                                + "（候補: \(names(of: IndicatorStyle.allCases))）"))
+                }
+            }
+            if let value = indicator.hudDurationMS {
+                configuration.hudDuration = clamped(
+                    value / 1000, to: 0.05...5, label: "[indicator] hud-duration-ms", &problems)
+            }
+        }
+
+        if let wallpaper = raw.wallpaper, wallpaper.enabled ?? true {
+            for (key, path) in wallpaper.map ?? [:] {
+                guard let workspace = Int(key), workspace >= 1 else {
+                    problems.append(
+                        Problem(
+                            kind: .invalidValue,
+                            detail: "[wallpaper.map] のキーはワークスペース番号（1 以上）: \(key)"))
+                    continue
+                }
+                configuration.wallpapers[workspace] = path
+            }
+        }
+
         let bindings = parseBindings(raw.mode, problems: &problems)
         if bindings.isEmpty {
             // 設定ファイルは既定を**置き換える**。`[gaps]` だけ書いた設定で
@@ -263,6 +316,22 @@ public enum ConfigLoader {
         cases.map(\.rawValue).joined(separator: " | ")
     }
 
+    /// 色を解釈する。書かれていなければ `nil`、書かれていて読めなければ問題として残す。
+    private static func color(
+        _ text: String?, _ label: String, _ problems: inout [Problem]
+    ) -> RGBAColor? {
+        guard let text else { return nil }
+        guard let parsed = RGBAColor(hex: text) else {
+            problems.append(
+                Problem(
+                    kind: .invalidValue,
+                    detail: "\(label) を色として解釈できない: \(text)"
+                        + "（#RGB / #RRGGBB / #RRGGBBAA）"))
+            return nil
+        }
+        return parsed
+    }
+
     /// 範囲外の値を端で止め、丸めたことを理由つきで残す。
     private static func clamped<T: Comparable>(
         _ value: T, to range: ClosedRange<T>, label: String, _ problems: inout [Problem]
@@ -315,13 +384,47 @@ private struct RawConfiguration: Decodable {
     var gaps: RawGaps?
     var performance: RawPerformance?
     var debug: RawDebug?
+    var border: RawBorder?
+    var indicator: RawIndicator?
+    var wallpaper: RawWallpaper?
     var mode: [String: RawMode]?
     var windowRule: [RawWindowRule]?
 
     enum CodingKeys: String, CodingKey {
-        case normalization, layout, workspaces, gaps, performance, debug, mode
+        case normalization, layout, workspaces, gaps, performance, debug
+        case border, indicator, wallpaper, mode
         case windowRule = "window-rule"
     }
+}
+
+private struct RawBorder: Decodable {
+    var enabled: Bool?
+    var width: CGFloat?
+    var radius: CGFloat?
+    var colorFocused: String?
+    var colorUnfocused: String?
+
+    enum CodingKeys: String, CodingKey {
+        case enabled, width, radius
+        case colorFocused = "color-focused"
+        case colorUnfocused = "color-unfocused"
+    }
+}
+
+private struct RawIndicator: Decodable {
+    var style: String?
+    var hudDurationMS: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case style
+        case hudDurationMS = "hud-duration-ms"
+    }
+}
+
+private struct RawWallpaper: Decodable {
+    var enabled: Bool?
+    /// TOML のキーは文字列なので、番号への変換は読み込み側で行う。
+    var map: [String: String]?
 }
 
 private struct RawWorkspaces: Decodable {

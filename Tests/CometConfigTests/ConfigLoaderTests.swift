@@ -306,6 +306,119 @@ struct ConfigLoaderTests {
         #expect(configuration.gaps.innerHorizontal == 3)
     }
 
+    // MARK: - 見た目
+
+    @Test("border を読める")
+    func parsesBorder() throws {
+        let configuration = try ConfigLoader.parse(
+            """
+            [border]
+            enabled         = false
+            width           = 3.5
+            radius          = 6
+            color-focused   = "#ff0000"
+            """)
+
+        #expect(configuration.border.isEnabled == false)
+        #expect(configuration.border.width == 3.5)
+        #expect(configuration.border.radius == 6)
+        #expect(configuration.border.focusedColor == RGBAColor(hex: "#ff0000"))
+    }
+
+    // 書いてあるのに効かない項目は黙って無視しない。
+    @Test("未対応の設定項目は問題として記録する")
+    func unsupportedOptionIsReported() throws {
+        let configuration = try ConfigLoader.parse("[border]\ncolor-unfocused = \"#ffffff\"")
+        #expect(configuration.problems.contains { $0.kind == .unsupportedOption })
+    }
+
+    @Test("色を解釈できなければ既定に落として問題として記録する")
+    func invalidColorIsReported() throws {
+        let configuration = try ConfigLoader.parse("[border]\ncolor-focused = \"blue\"")
+
+        #expect(configuration.border.focusedColor == Configuration().border.focusedColor)
+        #expect(configuration.problems.contains { $0.kind == .invalidValue })
+    }
+
+    @Test("枠線の太さと半径は範囲で止める")
+    func borderMetricsAreClamped() throws {
+        let configuration = try ConfigLoader.parse("[border]\nwidth = -1\nradius = 9999")
+        #expect(configuration.border.width == 0)
+        #expect(configuration.border.radius == 100)
+    }
+
+    @Test("indicator を読める")
+    func parsesIndicator() throws {
+        let configuration = try ConfigLoader.parse(
+            """
+            [indicator]
+            style           = "menubar"
+            hud-duration-ms = 800
+            """)
+
+        #expect(configuration.indicator == .menubar)
+        #expect(configuration.hudDuration == 0.8)
+    }
+
+    @Test("indicator の値が不明なら既定に落とす")
+    func invalidIndicatorStyleIsReported() throws {
+        let configuration = try ConfigLoader.parse("[indicator]\nstyle = \"neon\"")
+        #expect(configuration.indicator == .both)
+        #expect(configuration.problems.contains { $0.kind == .invalidValue })
+    }
+
+    @Test("wallpaper のマップを読める")
+    func parsesWallpaperMap() throws {
+        let configuration = try ConfigLoader.parse(
+            """
+            [wallpaper]
+            enabled = true
+
+            [wallpaper.map]
+            1 = "~/a.jpg"
+            3 = "/b.png"
+            """)
+
+        #expect(configuration.wallpapers == [1: "~/a.jpg", 3: "/b.png"])
+    }
+
+    @Test("wallpaper を無効にするとマップを読まない")
+    func disabledWallpaperIsIgnored() throws {
+        let configuration = try ConfigLoader.parse(
+            """
+            [wallpaper]
+            enabled = false
+
+            [wallpaper.map]
+            1 = "~/a.jpg"
+            """)
+
+        #expect(configuration.wallpapers.isEmpty)
+    }
+
+    @Test("wallpaper のキーがワークスペース番号でなければ問題として記録する")
+    func invalidWallpaperKeyIsReported() throws {
+        let configuration = try ConfigLoader.parse(
+            """
+            [wallpaper.map]
+            main = "~/a.jpg"
+            0    = "~/b.jpg"
+            """)
+
+        #expect(configuration.wallpapers.isEmpty)
+        #expect(configuration.problems.filter { $0.kind == .invalidValue }.count == 2)
+    }
+
+    @Test("既定の設定は見た目の項目を明示している")
+    func builtInDocumentsAppearance() throws {
+        let configuration = try ConfigLoader.parse(Configuration.defaultTOML)
+        #expect(configuration.border.isEnabled)
+        #expect(configuration.border.focusedColor == RGBAColor(hex: "#7aa2f7"))
+        #expect(configuration.indicator == .both)
+        #expect(configuration.hudDuration == 0.4)
+        #expect(configuration.wallpapers.isEmpty, "既定では壁紙を指定しない")
+    }
+
     // MARK: - バインド
 
     @Test("1つのコマンドでも配列でも読める")

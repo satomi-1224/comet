@@ -22,6 +22,9 @@ let package = Package(
         // 状態機械とレイアウト。副作用のない計算はここに集める。
         .target(name: "CometCore", dependencies: ["CometSupport", "CometAccessibility"]),
 
+        // 内蔵UI。枠線・インジケータ・壁紙。CometCore は AppKit の表示を知らない。
+        .target(name: "CometDecoration", dependencies: ["CometSupport", "CometCore"]),
+
         // 設定ファイルの読み込み。CometCore の型（Gaps 等）へは依存させ、
         // 逆向き（Core → Config）には依存させない。
         .target(
@@ -36,6 +39,7 @@ let package = Package(
             name: "comet",
             dependencies: [
                 "CometSupport", "CometInput", "CometAccessibility", "CometCore", "CometConfig",
+                "CometDecoration",
             ]
         ),
 
@@ -44,5 +48,6 @@ let package = Package(
         .testTarget(name: "CometAccessibilityTests", dependencies: ["CometAccessibility"]),
         .testTarget(name: "CometCoreTests", dependencies: ["CometCore"]),
         .testTarget(name: "CometConfigTests", dependencies: ["CometConfig"]),
+        .testTarget(name: "CometDecorationTests", dependencies: ["CometDecoration"]),
     ]
 )

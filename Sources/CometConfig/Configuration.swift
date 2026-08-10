@@ -43,6 +43,8 @@ public struct Problem: Sendable, Equatable, CustomStringConvertible {
         case unreadable
         /// キーバインドが1つも無い。
         case noBindings
+        /// 綴りは知っているが、まだ効かない設定項目。
+        case unsupportedOption
     }
 
     public let kind: Kind
@@ -69,6 +71,11 @@ public struct Configuration: Sendable, Equatable {
     /// 設定に書かれていなければ `nil`。コマンドライン引数の指定を上書きしないため。
     public var logLevel: LogLevel?
     public var performance = PerformanceOptions()
+    public var border = BorderStyle()
+    public var indicator = IndicatorStyle.both
+    public var hudDuration: TimeInterval = 0.4
+    /// ワークスペース番号 → 壁紙のパス。**実在の検証は読み込み側で行う。**
+    public var wallpapers: [WorkspaceID: String] = [:]
     public var bindings: [Binding] = []
     public var windowRules: [WindowRule] = []
     public var problems: [Problem] = []
@@ -200,10 +207,27 @@ public struct Configuration: Sendable, Equatable {
         if-app-id = "com.apple.systempreferences"
         run       = "layout floating"
 
-        # ---- 以下は未実装。書いても効かない ----
-        #
-        # [wallpaper]      Phase 5
-        # [border]         Phase 5
-        # [indicator]      Phase 5
+        # ---- 見た目 ----
+
+        [border]
+        enabled       = true
+        width         = 2.0
+        radius        = 10.0
+        color-focused = "#7aa2f7"
+        # タイル全部に枠を描く color-unfocused は未対応
+
+        [indicator]
+        # "menubar" | "hud" | "both" | "off"
+        style           = "both"
+        hud-duration-ms = 400
+
+        [wallpaper]
+        enabled = true
+
+        # ワークスペース番号 → 画像パス。未設定のワークスペースでは壁紙を変えない。
+        # 存在しないパスは起動時に警告して捨てる。
+        [wallpaper.map]
+        # 1 = "~/Pictures/wallpapers/wallpaper1.jpg"
+        # 2 = "~/Pictures/wallpapers/wallpaper2.jpg"
         """
 }

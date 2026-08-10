@@ -119,6 +119,18 @@ public final class Engine: WindowResolving {
     /// 画面外退避方式では Cmd+Tab や Dock から非表示のウィンドウを選べてしまい、
     /// 「アプリは前面だがウィンドウが見えない」状態になる（設計書 §12.6）。
     public var focusFollowsActivation = true
+
+    /// フォーカス中のウィンドウの矩形（AX 座標）が決まったときに呼ばれる。
+    ///
+    /// **AX の適用完了を待たずに呼ぶ。** 枠線を先に着地させると遅延が視覚的に隠れる
+    ///（設計書 §8.2）。フォーカス先が無いときは `nil`。
+    public var onFocusedFrameChanged: (@MainActor (CGRect?) -> Void)?
+
+    /// 表示するワークスペースが変わったときに呼ばれる。
+    ///
+    /// **ウィンドウ移動の発行より前に呼ぶ。** 壁紙とインジケータは自プロセス側の
+    /// 処理なので即座に終わり、切替が速く見える（症状D）。
+    public var onWorkspaceChanged: (@MainActor (WorkspaceID) -> Void)?
     /// 追従を諦めたウィンドウをフローティングへ降格させる、ずれの下限。
     ///
     /// 文字セル単位への丸め（WezTerm）や最小寸法は数十 pt のずれで収まる。
@@ -551,6 +563,20 @@ public final class Engine: WindowResolving {
         focusedWindowID = id
         focusCounter += 1
         root.findWindow(id)?.lastFocusedAt = focusCounter
+        notifyFocusedFrame()
+    }
+
+    /// 枠線の位置を伝える。
+    ///
+    /// 目標矩形が分かっていればそれを使う（適用の完了を待たない）。
+    /// 分からないもの（フローティングなど）は実測値に合わせる。
+    private func notifyFocusedFrame() {
+        guard let handler = onFocusedFrameChanged else { return }
+        guard let id = focusedWindowOnActiveWorkspace() else {
+            handler(nil)
+            return
+        }
+        handler(desiredFrames[id] ?? registry[id]?.observedFrame)
     }
 
     /// コマンドの対象になるウィンドウノード。
@@ -678,6 +704,9 @@ public final class Engine: WindowResolving {
         isRestoringWorkspace = true
 
         log.info("ワークスペース \(outgoing.id) → \(incoming.id)")
+        // 壁紙とインジケータはウィンドウ移動より先に。どちらも自プロセス側なので
+        // 即座に終わり、切替が速く見える（症状D）。
+        onWorkspaceChanged?(incoming.id)
         // フォーカスは**再配置のあと**に戻す。先に戻すと、まだ退避先にいる
         // ウィンドウをアクティブにしてしまい「アプリは前面だが見えない」状態になる。
         pendingFocusRestore = incoming.id
@@ -1177,6 +1206,7 @@ public final class Engine: WindowResolving {
                 restoreFocus(in: target)
             }
         }
+        notifyFocusedFrame()
     }
 
     /// 表示中のワークスペースの目標矩形を積む。
@@ -1356,6 +1386,12 @@ public final class Engine: WindowResolving {
         registry.update(id) { $0.observedFrame = observed ?? target }
 
         guard let observed else { return }
+        // 目標に届かなかった場合は枠線を実測値へ合わせ直す（設計書 §8.2）。
+        if id == focusedWindowID,
+            !Geometry.isApproximatelyEqual(observed, target, tolerance: 1)
+        {
+            onFocusedFrameChanged?(observed)
+        }
         learnMinimum(id, target: target, observed: observed)
     }
 

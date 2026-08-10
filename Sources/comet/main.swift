@@ -3,6 +3,7 @@ import Foundation
 import CometAccessibility
 import CometConfig
 import CometCore
+import CometDecoration
 import CometInput
 import CometSupport
 
@@ -219,7 +220,32 @@ engine.insertionStrategy = configuration.insertionStrategy
 engine.defaultOrientation = configuration.defaultOrientation
 engine.windowRules = configuration.windowRules
 engine.focusFollowsActivation = configuration.focusFollowsActivation
+
+// MARK: - 内蔵UI
+//
+// Engine は表示を知らない（CometCore は AppKit に依存しない）。配線はここで行い、
+// Engine はクロージャで合図だけを出す。
+let decoration = DecorationController(
+    border: configuration.border,
+    indicator: configuration.indicator,
+    hudDuration: configuration.hudDuration,
+    workspaceCount: configuration.workspaceCount,
+    log: log)
+decoration.loadWallpapers(configuration.wallpapers)
+
+// 内蔵UI は dry-run でも動かす。**他のアプリのウィンドウには一切触らない**ので安全で、
+// 「枠線が目標位置を指す」ことがそのまま配置計算の目視確認になる。
+engine.onFocusedFrameChanged = { [weak decoration] rect in
+    decoration?.focusedFrameChanged(to: rect)
+}
+engine.onWorkspaceChanged = { [weak decoration] workspace in
+    decoration?.workspaceChanged(to: workspace)
+}
+
 engine.start()
+
+// 起動時のインジケータを合わせる（切替が起きるまで何も出ないのを避ける）。
+decoration.workspaceChanged(to: engine.activeWorkspaceID)
 
 if engine.isTimingEnabled {
     log.info("計測が有効。ctrl-alt-shift-t で適用レイテンシを出力する")
@@ -275,6 +301,7 @@ func terminateAfterRestoringWindows(reason: String) {
             Log.shared.info("計測: \(line)")
         }
     }
+    decoration.stop()
     let restored = engine.prepareForTermination()
     guard restored > 0 else {
         NSApp.terminate(nil)
