@@ -30,7 +30,15 @@ public enum LaunchOptionsError: Error, Equatable, CustomStringConvertible {
 /// 実行時の副作用（ログ設定・ホットキー登録）は呼び出し側が行う。
 public struct LaunchOptions: Equatable, Sendable {
 
-    public var logLevel: LogLevel = .info
+    /// `--log-level` の明示的な指定。無ければ `nil`。
+    ///
+    /// 既定値を持たせないのは、設定ファイルの `[debug] log-level` と
+    /// 優先順位を付けられるようにするため（コマンドライン > 設定 > 既定）。
+    public var logLevel: LogLevel?
+    /// 優先順位を解決したあとのログレベル。
+    public func resolvedLogLevel(configured: LogLevel?) -> LogLevel {
+        logLevel ?? configured ?? .info
+    }
     public var hotkeys: [String] = []
     public var showHelp: Bool = false
     public var printKeys: Bool = false
@@ -39,6 +47,12 @@ public struct LaunchOptions: Equatable, Sendable {
     public var dryRun: Bool = false
     /// 指定枚数のレイアウトを図示して終了する。ウィンドウには一切触れない。
     public var previewLayout: Int?
+    /// 設定ファイルの場所。無指定なら既定の場所を使う。
+    public var configPath: String?
+    /// 設定ファイルを読まずに組み込みの既定で起動する。
+    public var ignoreConfig: Bool = false
+    /// 組み込みの既定設定を出力して終了する。設定ファイルの雛形になる。
+    public var printDefaultConfig: Bool = false
 
     public init() {}
 
@@ -50,7 +64,13 @@ public struct LaunchOptions: Equatable, Sendable {
 
         オプション:
           --log-level <level>   ログレベル (\(LogLevel.allCases.map(\.name).joined(separator: "|")))
-                                既定: info
+                                既定: 設定ファイルの値、無ければ info
+          --config <path>       設定ファイルの場所
+                                既定: ~/.config/comet/config.toml
+          --no-config           設定ファイルを読まず組み込みの既定で起動する
+          --print-default-config
+                                組み込みの既定設定を出力して終了する。
+                                設定ファイルの雛形になる。
           --hotkey <spec>       押下をログに出すだけの確認用ホットキー。複数回指定できる。
                                 例: --hotkey alt-h --hotkey cmd-shift-space
           --dry-run             レイアウトを計算するがウィンドウは動かさない。
@@ -99,6 +119,8 @@ public struct LaunchOptions: Equatable, Sendable {
                         throw LaunchOptionsError.invalidWindowCount(value)
                     }
                     options.previewLayout = count
+                case "--config":
+                    options.configPath = value
                 default:
                     throw LaunchOptionsError.unknownFlag(flag)
                 }
@@ -115,6 +137,14 @@ public struct LaunchOptions: Equatable, Sendable {
                 options.printKeys = true
                 index += 1
 
+            case "--print-default-config":
+                options.printDefaultConfig = true
+                index += 1
+
+            case "--no-config":
+                options.ignoreConfig = true
+                index += 1
+
             case "--dry-run":
                 options.dryRun = true
                 index += 1
@@ -128,6 +158,9 @@ public struct LaunchOptions: Equatable, Sendable {
 
             case "--hotkey":
                 options.hotkeys.append(try takeValue(args, after: &index, flag: arg))
+
+            case "--config":
+                options.configPath = try takeValue(args, after: &index, flag: arg)
 
             case "--preview-layout":
                 let value = try takeValue(args, after: &index, flag: arg)

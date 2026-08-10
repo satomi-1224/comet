@@ -52,6 +52,11 @@ public enum AXAttribute {
     public static let enhancedUserInterface = "AXEnhancedUserInterface"
 }
 
+/// AX アクション名。
+public enum AXAction {
+    public static let raise = "AXRaise"
+}
+
 /// AX 通知名。
 public enum AXNotification {
     public static let windowCreated = "AXWindowCreated"

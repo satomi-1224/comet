@@ -192,4 +192,39 @@ struct WindowRegistryTests {
         registry.insert(record(3, pid: 100))
         #expect(Set(registry.knownPIDs) == [100, 200])
     }
+
+    // MARK: - ワークスペース
+
+    @Test("ワークスペースで絞り込める")
+    func filtersByWorkspace() {
+        let registry = WindowRegistry()
+        registry.insert(WindowRecord(id: 1, pid: 10, disposition: .tiled, workspace: 1))
+        registry.insert(WindowRecord(id: 2, pid: 10, disposition: .tiled, workspace: 2))
+        registry.insert(WindowRecord(id: 3, pid: 10, disposition: .floating, workspace: 2))
+        registry.insert(WindowRecord(id: 4, pid: 10, disposition: .unmanaged(.minimized), workspace: 2))
+
+        #expect(registry.tiledIDs(in: 1) == [1])
+        #expect(registry.tiledIDs(in: 2) == [2], "フローティングは含まない")
+        #expect(registry.visibleIDs(in: 2) == [2, 3], "退避の対象はタイルとフローティング")
+        #expect(registry.visibleIDs(in: 2).contains(4) == false, "管理対象外は位置を触らない")
+        #expect(registry.tiledIDs(in: 9).isEmpty)
+    }
+
+    @Test("既定の所属は1番")
+    func defaultWorkspaceIsOne() {
+        let registry = WindowRegistry()
+        registry.insert(WindowRecord(id: 1, pid: 10, disposition: .tiled))
+        #expect(registry[1]?.workspace == 1)
+    }
+
+    @Test("所属を書き換えられる")
+    func workspaceIsMutable() {
+        let registry = WindowRegistry()
+        registry.insert(WindowRecord(id: 1, pid: 10, disposition: .tiled))
+        registry.update(1) { $0.workspace = 4 }
+
+        #expect(registry.tiledIDs(in: 1).isEmpty)
+        #expect(registry.tiledIDs(in: 4) == [1])
+        #expect(registry.allIDs == [1], "登録順は変わらない")
+    }
 }

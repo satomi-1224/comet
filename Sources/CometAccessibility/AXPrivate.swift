@@ -49,10 +49,44 @@ public enum AXPrivate {
     /// ウィンドウ以外の要素、既に破棄された要素、応答しないプロセスの要素では `nil`。
     /// これらは異常系ではなく通常経路なので、呼び出し側は毎回 `nil` を想定すること。
     public static func windowID(of element: AXUIElement) -> CGWindowID? {
-        guard let getWindow = resolvedGetWindow else { return nil }
+        try? identifier(of: element)
+    }
+
+    /// 失敗の理由が要るとき用。走査でウィンドウを取りこぼしたときの診断に使う。
+    ///
+    /// 「ID を取れなかった」だけでは、疑似ウィンドウ（Finder のデスクトップなど）なのか、
+    /// 権限が外れているのか、応答しないアプリなのかが切り分けられない。
+    public static func identifier(of element: AXUIElement) throws -> CGWindowID {
+        guard let getWindow = resolvedGetWindow else { throw Failure.symbolMissing }
         var identifier: CGWindowID = 0
         let error = getWindow(element, &identifier)
-        guard error == .success, identifier != 0 else { return nil }
+        guard error == .success else { throw Failure.axError(error) }
+        guard identifier != 0 else { throw Failure.zeroIdentifier }
         return identifier
+    }
+
+    public enum Failure: Error, Equatable, CustomStringConvertible {
+        case symbolMissing
+        case axError(AXError)
+        /// 呼び出しは成功したが 0 が返った。ウィンドウとして扱えない。
+        case zeroIdentifier
+
+        public var description: String {
+            switch self {
+            case .symbolMissing:
+                "_AXUIElementGetWindow を解決できていない"
+            case .zeroIdentifier:
+                "ID が 0（ウィンドウとして扱えない要素）"
+            case .axError(let error):
+                switch error {
+                case .apiDisabled: "アクセシビリティ権限が無効"
+                case .illegalArgument: "引数が不正（権限が外れている疑い。再ビルド後に頻発する）"
+                case .invalidUIElement: "要素が無効（疑似ウィンドウか、すでに破棄されている）"
+                case .cannotComplete: "応答が得られない（アプリがビジーかタイムアウト）"
+                case .notImplemented: "アプリがこの問い合わせに対応していない"
+                default: "AXError(\(error.rawValue))"
+                }
+            }
+        }
     }
 }

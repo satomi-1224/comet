@@ -7,8 +7,15 @@ Swift 製の単一プロセスに置き換えることを目的とする。
 
 ## 現在の状態
 
-**Phase 0（基盤）完了。** ホットキーを押すとログが出るところまで。
-ウィンドウ操作はまだ実装していない。
+**Phase 3（ワークスペース）まで実装済み。**
+
+- ウィンドウを開くと自動でタイルされ、閉じると再配置される
+- `focus` / `move` / `resize` / `join-with` / `layout` が動く
+- ワークスペース 10 個。`alt-1`..`alt-0` で切替、`alt-shift-1`..で移動して追従、`alt-tab` で直前へ
+- 設定ファイル（`~/.config/comet/config.toml`）でギャップ・キーバインド・ウィンドウルールを変えられる
+- 内蔵 UI（フォーカス枠線・ワークスペースインジケータ・壁紙）はまだ**未実装**
+
+進捗の詳細は [PROGRESS.md](PROGRESS.md)。
 
 ## 必要なもの
 
@@ -40,14 +47,72 @@ log stream --predicate 'subsystem == "local.comet"'
 
 | オプション | 内容 |
 |---|---|
-| `--log-level <level>` | `trace` / `debug` / `info` / `warn` / `error` / `off`。既定は `info` |
-| `--hotkey <spec>` | 登録するホットキー。複数回指定可。省略時は `ctrl-alt-shift-{h,j,k,l}` |
+| `--log-level <level>` | `trace` / `debug` / `info` / `warn` / `error` / `off`。既定は設定ファイルの値、無ければ `info` |
+| `--config <path>` | 設定ファイルの場所。既定は `~/.config/comet/config.toml` |
+| `--no-config` | 設定ファイルを読まず組み込みの既定で起動する |
+| `--print-default-config` | 組み込みの既定設定を出力して終了。設定ファイルの雛形になる |
+| `--preview-layout <n>` | n 枚のときの配置を図示して終了。**ウィンドウには一切触れない** |
+| `--dry-run` | 配置を計算するがウィンドウは動かさない。他の WM が動いている環境での検証用 |
+| `--hotkey <spec>` | 押下をログに出すだけの確認用ホットキー。複数回指定可 |
 | `--print-keys` | 指定できるキー名を一覧表示 |
 | `--help` | ヘルプ |
+
+常駐中のホットキー（設定とは別に固定）:
+
+| キー | 内容 |
+|---|---|
+| `ctrl-alt-shift-q` | 終了 |
+| `ctrl-alt-shift-r` | 再配置（全ワークスペースの状態をログに出す） |
 
 ホットキーの書式は `alt-shift-h` のように修飾キーとキーをハイフンで連ねる。
 修飾キーは `cmd` / `alt` / `ctrl` / `shift`（別名 `command` / `opt` / `option` / `control`）。
 `-` 自体をキーに指定するときは `minus` と綴る。
+
+## 設定
+
+```bash
+# 雛形を書き出す
+mkdir -p ~/.config/comet
+comet --print-default-config > ~/.config/comet/config.toml
+```
+
+既定のキーバインドは現行 AeroSpace 設定の移植で、`alt-hjkl`（フォーカス）/
+`alt-shift-hjkl`（移動）/ `alt-ctrl-hjkl`（リサイズ）/ `alt-e`・`alt-w`（まとめる）/
+`alt-slash`（向きの切替）/ `alt-shift-f`（フローティング切替）。
+`workspace` 系は未実装なので、書いてあっても起動時に「未対応」として飛ばされる。
+
+**設定の誤りで起動は止まらない。** 解釈できなかった項目は既定値に落ち、
+理由が起動時のログに出る。
+
+新しいウィンドウの入り方は 2 通りから選べる。
+
+| `[layout] insertion` | 動き |
+|---|---|
+| `split`（既定） | フォーカス中のウィンドウの領域を分割して入る（dwindle） |
+| `sibling` | フォーカス中のウィンドウの隣に並べる（AeroSpace と同じ） |
+
+`--preview-layout <n>` で、ウィンドウに触れずに枚数ごとの配置を確認できる。
+
+### ワークスペース
+
+非表示のワークスペースのウィンドウは**全モニタの外側へ動かして隠す**（画面外退避方式）。
+macOS ネイティブの Spaces は常に1つだけ使うので、切替に OS のアニメーションが挟まらない。
+
+この方式の性質として、**Cmd+Tab と Mission Control には非表示のウィンドウも出る。**
+そこから非表示ワークスペースのアプリを選ぶと「アプリは前面だがウィンドウが見えない」状態になる
+（自動で追従する仕組みは Phase 4）。
+
+`ctrl-alt-shift-q` で終了すると、退避していたウィンドウは画面へ戻してから終わる。
+`kill` で落とすと画面外に残るので注意。
+
+以下のシステム設定が前提になる。
+
+| 設定 | 値 |
+|---|---|
+| Mission Control > ディスプレイごとに個別の操作スペース | オフ |
+| Mission Control > 最新の使用状況に基づいて操作スペースを自動的に並べ替える | オフ |
+| Stage Manager | オフ |
+| アクセシビリティ > 視差効果を減らす | オン推奨 |
 
 ## 初回セットアップ
 
@@ -104,6 +169,11 @@ Sources/
   CometSupport/         ログ、起動オプション、インスタンスロック
   CometInput/           ホットキー（Carbon RegisterEventHotKey）
   CometAccessibility/   AX API へのアクセス層、PID ごとのキュー、権限
+  CometCore/            状態機械とレイアウト（副作用のない計算はここ）
+    State/              BSP ツリー、正規化、ワークスペース、台帳、モニタ、ウィンドウルール
+    Layout/             矩形の算出、座標変換、丸め
+    Commands/           コマンドのパースとツリー操作
+  CometConfig/          設定ファイル（TOML）の読み込み
   comet/                エントリポイント
 scripts/
   env.sh             共通ビルド環境（CLT 向けの探索パス補正）
@@ -111,3 +181,15 @@ scripts/
   build-app.sh       .app の組み立てと署名
   make-signing-cert.sh  開発用署名 ID の作成
 ```
+
+## 権限が外れたときの見分け方
+
+ウィンドウが1枚も並ばないときは、起動時のログに理由が出る。
+
+```
+WRN ウィンドウを1枚も認識できなかった（ID 取得に 5 件失敗: 引数が不正（権限が外れている疑い…
+```
+
+ad-hoc 署名の identifier には実行ファイルの内容ハッシュが入るため、
+**再ビルドすると別アプリとして扱われて権限が外れる。**
+`./scripts/make-signing-cert.sh` で固定の署名 ID を作れば維持される。

@@ -77,9 +77,15 @@ public enum UnmanagedReason: String, Equatable, Sendable, CaseIterable, CustomSt
 
 public enum WindowDisposition: Equatable, Sendable {
     case tiled
+    /// ツリー外。位置は自由で、レイアウトは触らない。
+    ///
+    /// ウィンドウルールの `layout floating` 指定と `layout floating tiling` コマンドで
+    /// この状態になる。判定（``WindowClassifier``）からは出てこない。
+    case floating
     case unmanaged(UnmanagedReason)
 
     public var isTiled: Bool { self == .tiled }
+    public var isFloating: Bool { self == .floating }
 }
 
 /// どのウィンドウをタイル管理下に置くかの判定。

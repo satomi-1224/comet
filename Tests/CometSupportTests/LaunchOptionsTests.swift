@@ -8,10 +8,33 @@ struct LaunchOptionsTests {
     @Test("引数なしなら既定値")
     func defaults() throws {
         let opts = try LaunchOptions.parse([])
-        #expect(opts.logLevel == .info)
+        #expect(opts.logLevel == nil, "明示されていなければ指定なし")
+        #expect(opts.resolvedLogLevel(configured: nil) == .info)
         #expect(opts.hotkeys.isEmpty)
         #expect(opts.showHelp == false)
         #expect(opts.printKeys == false)
+        #expect(opts.configPath == nil)
+        #expect(opts.ignoreConfig == false)
+        #expect(opts.printDefaultConfig == false)
+    }
+
+    // 優先順位: コマンドライン > 設定ファイル > 既定。
+    // 逆にすると `--log-level trace` でデバッグしようとしても設定に戻される。
+    @Test("ログレベルはコマンドラインが設定ファイルより優先される")
+    func logLevelPrecedence() throws {
+        let explicit = try LaunchOptions.parse(["--log-level", "trace"])
+        #expect(explicit.resolvedLogLevel(configured: .warn) == .trace)
+
+        let implicit = try LaunchOptions.parse([])
+        #expect(implicit.resolvedLogLevel(configured: .warn) == .warn)
+    }
+
+    @Test("設定ファイルに関するオプションを解釈する")
+    func configOptions() throws {
+        #expect(try LaunchOptions.parse(["--config", "/tmp/a.toml"]).configPath == "/tmp/a.toml")
+        #expect(try LaunchOptions.parse(["--config=/tmp/b.toml"]).configPath == "/tmp/b.toml")
+        #expect(try LaunchOptions.parse(["--no-config"]).ignoreConfig)
+        #expect(try LaunchOptions.parse(["--print-default-config"]).printDefaultConfig)
     }
 
     @Test("--log-level を解釈する")

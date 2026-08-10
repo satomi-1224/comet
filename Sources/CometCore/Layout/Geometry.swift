@@ -35,6 +35,25 @@ public enum Geometry {
             height: rect.height)
     }
 
+    /// 非表示ワークスペースのウィンドウを退避させる座標（AX 座標系）。
+    ///
+    /// 全モニタの union 矩形の**下方**へ十分に逃がす。
+    ///
+    /// - 上方（負の方向）へ逃がすとアプリ側で画面内へ引き戻されることがあるので、
+    ///   必ず正方向へ出す。
+    /// - 寸法 0 の矩形は「そこに画面がある」ことを意味しないので union に混ぜない。
+    ///   混ぜると退避先が無意味に遠ざかる。
+    ///
+    /// - Important: モニタを付け替えると union が変わる。**退避中のウィンドウを
+    ///   新しい退避先へ動かし直さないと、画面の中に現れる**（設計書 §7.6 手順5）。
+    public static func stashOrigin(outside monitors: [CGRect], margin: CGFloat = 100_000)
+        -> CGPoint
+    {
+        let union = monitors.filter { !$0.isEmpty }.reduce(CGRect.null) { $0.union($1) }
+        guard !union.isNull else { return CGPoint(x: 0, y: margin) }
+        return CGPoint(x: union.minX, y: union.maxY + margin)
+    }
+
     /// 値をピクセル格子に載せる。`scale` は `backingScaleFactor`（Retina なら 2）。
     public static func rounded(_ value: CGFloat, scale: CGFloat) -> CGFloat {
         guard scale > 0 else { return value }

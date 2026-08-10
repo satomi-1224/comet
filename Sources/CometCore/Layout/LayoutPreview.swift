@@ -7,15 +7,30 @@ import CoreGraphics
 /// 動いている環境でも安全に使える。
 public enum LayoutPreview {
 
-    /// 指定枚数のレイアウトを図示する。
+    /// 指定枚数を順に開いたときの配置を図示する。
+    ///
+    /// 「常に新しいウィンドウにフォーカスがある」状態を想定して積み上げるので、
+    /// 実際に `count` 枚開いたときの形と一致する。
     public static func render(
         count: Int,
         area: CGRect,
         gaps: Gaps,
+        strategy: TreeSync.InsertionStrategy = .split,
         columns: Int = 74,
         rows: Int = 22
     ) -> String {
-        let rects = SimpleLayout.spiral(count: count, in: area, gaps: gaps, scale: 1)
+        guard count > 0 else { return "（配置できるウィンドウがない）" }
+
+        let root = ContainerNode(orientation: .automatic(for: area.size))
+        var tiled: [CGWindowID] = []
+        for id in 1...count {
+            tiled.append(CGWindowID(id))
+            TreeSync.reconcile(
+                root: root, tiled: tiled, focused: CGWindowID(id - 1), strategy: strategy)
+        }
+
+        let layout = LayoutEngine.compute(root: root, area: area, gaps: gaps, scale: 1)
+        let rects = layout.order.compactMap { layout.frames[$0] }
         guard !rects.isEmpty else { return "（配置できるウィンドウがない）" }
 
         let letters = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
@@ -45,6 +60,8 @@ public enum LayoutPreview {
                 "  \(mark)  (\(Int(rect.minX)), \(Int(rect.minY)))"
                     + "  \(Int(rect.width)) x \(Int(rect.height))")
         }
+        lines.append("")
+        lines.append("  ツリー: \(root)")
         return lines.joined(separator: "\n")
     }
 

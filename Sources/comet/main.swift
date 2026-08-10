@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import CometAccessibility
+import CometConfig
 import CometCore
 import CometInput
 import CometSupport
@@ -68,18 +69,62 @@ if options.printKeys {
     exit(0)
 }
 
+if options.printDefaultConfig {
+    print(Configuration.defaultTOML)
+    exit(0)
+}
+
+// MARK: - 設定
+
+// 設定の誤りで起動を止めない。読めなかった項目は既定値に落ちて `problems` に理由が残る。
+let configuration: Configuration
+let configSource: ConfigLoader.Source
+if options.ignoreConfig {
+    configuration = ConfigLoader.builtIn()
+    configSource = .builtIn
+} else {
+    (configuration, configSource) = ConfigLoader.load(
+        path: options.configPath ?? ConfigLoader.defaultPath())
+}
+
 if let count = options.previewLayout {
     let area = LayoutPreview.primaryVisibleFrame()
     print("領域 (\(Int(area.minX)), \(Int(area.minY))) \(Int(area.width))x\(Int(area.height))  ウィンドウ \(count) 枚\n")
-    print(LayoutPreview.render(count: count, area: area, gaps: Gaps(inner: 5, outer: 5)))
+    print(
+        LayoutPreview.render(
+            count: count, area: area, gaps: configuration.gaps,
+            strategy: configuration.insertionStrategy))
     exit(0)
 }
 
 // MARK: - ログ
 
+let logLevel = options.resolvedLogLevel(configured: configuration.logLevel)
 let log = Log.shared
-log.threshold = options.logLevel
-log.info("comet 起動 (log-level=\(options.logLevel.name), pid=\(getpid()))")
+log.threshold = logLevel
+log.info("comet 起動 (log-level=\(logLevel.name), pid=\(getpid()))")
+
+switch configSource {
+case .file(let path):
+    log.info("設定を読み込んだ: \(path)")
+case .builtIn:
+    log.info("設定ファイルが無いので組み込みの既定で起動する（--print-default-config で雛形を出せる）")
+}
+
+// 未対応コマンドは既定の設定にも並んでいるので、まとめて1行で伝える。
+// 綴り間違いなど直せる問題は1件ずつ出す。
+let unsupported = configuration.problems.filter {
+    $0.kind == .unsupportedCommand || $0.kind == .unsupportedMode
+}
+for problem in configuration.problems where !unsupported.contains(problem) {
+    log.warn("設定: \(problem)")
+}
+if !unsupported.isEmpty {
+    log.info("設定: 未対応のため \(unsupported.count) 件のバインドを飛ばした（後続の Phase で実装する）")
+    for problem in unsupported {
+        log.debug("設定: \(problem)")
+    }
+}
 
 // 非公開シンボルの解決状況を起動時に記録しておく。
 // OS アップデートで消えた場合、ここが最初の手がかりになる（設計書 §12.2）。
@@ -165,8 +210,37 @@ if options.dryRun {
     log.info("dry-run: レイアウトを計算するがウィンドウは動かさない")
 }
 
-let engine = Engine(gaps: Gaps(inner: 5, outer: 5), dryRun: options.dryRun, log: log)
+let engine = Engine(
+    gaps: configuration.gaps, performance: configuration.performance,
+    workspaceCount: configuration.workspaceCount,
+    dryRun: options.dryRun, log: log)
+engine.normalization = configuration.normalization
+engine.insertionStrategy = configuration.insertionStrategy
+engine.defaultOrientation = configuration.defaultOrientation
+engine.windowRules = configuration.windowRules
 engine.start()
+
+// MARK: - 設定によるホットキー
+
+// 複数コマンドの割り当ては**まとめて1回の再配置**にする。中間状態を適用しないことで
+// 「ウィンドウ移動 + 切替」が1フレームで完了する（設計書 §9.5）。
+var boundCount = 0
+for binding in configuration.bindings {
+    do {
+        try hotkeyManager.register(binding.hotkey) { _ in
+            for command in binding.commands {
+                engine.execute(command)
+            }
+        }
+        log.debug("登録: \(binding.spec) → \(binding.commands.count) コマンド")
+        boundCount += 1
+    } catch {
+        // 他のウィンドウマネージャが同じキーを掴んでいると失敗する。
+        // 1つ失敗しても残りは登録する。
+        log.warn("\(binding.spec) を登録できなかった: \(error)")
+    }
+}
+log.info("設定から \(boundCount)/\(configuration.bindings.count) 個のホットキーを登録した")
 
 // MARK: - 制御用ホットキー
 
@@ -182,13 +256,33 @@ func registerControlHotkey(_ spec: String, label: String, action: @escaping @Mai
     }
 }
 
+// 終了前に退避中のウィンドウを画面へ戻す。
+//
+// 戻さずに終了すると、非表示ワークスペースのウィンドウが画面外に残ったままになり、
+// 利用者からは「ウィンドウが消えた」ようにしか見えない。AX の適用は非同期なので
+// 少しだけ待つ。待ち時間には上限を置く（応答しないアプリで終われなくなるのを防ぐ）。
+@MainActor
+func terminateAfterRestoringWindows(reason: String) {
+    Log.shared.info(reason)
+    let restored = engine.restoreStashedWindows()
+    guard restored > 0 else {
+        NSApp.terminate(nil)
+        return
+    }
+    Log.shared.info("退避していた \(restored) 枚を画面へ戻してから終了する")
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+        NSApp.terminate(nil)
+    }
+}
+
 registerControlHotkey("ctrl-alt-shift-q", label: "終了") {
-    Log.shared.info("終了ホットキーを受信した")
-    NSApp.terminate(nil)
+    terminateAfterRestoringWindows(reason: "終了ホットキーを受信した")
 }
 
 registerControlHotkey("ctrl-alt-shift-r", label: "再配置") {
-    Log.shared.info("再配置を要求された")
+    // 全ワークスペースの状態も出す。配置がおかしいときに、レイアウト計算・
+    // ツリーの組み方・所属ワークスペース・退避のどこがずれているのかを切り分けられる。
+    Log.shared.info("再配置を要求された: \(engine.stateDescription)")
     engine.relayout()
 }
 
@@ -199,8 +293,7 @@ signal(SIGINT, SIG_IGN)
 let interruptSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
 interruptSource.setEventHandler {
     MainActor.assumeIsolated {
-        Log.shared.info("SIGINT を受信した")
-        NSApp.terminate(nil)
+        terminateAfterRestoringWindows(reason: "SIGINT を受信した")
     }
 }
 interruptSource.resume()

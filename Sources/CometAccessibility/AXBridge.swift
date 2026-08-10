@@ -91,6 +91,9 @@ public enum AXBridge {
         public var missingIdentifier: Int = 0
         public var missingAttributes: Int = 0
         public var listError: String?
+        /// ID を取れなかった理由。件数だけでは疑似ウィンドウなのか権限の問題なのか
+        /// 切り分けられないので、理由を種類ごとに残す。
+        public var identifierErrors: [String] = []
     }
 
     /// アプリのウィンドウを走査し、識別子と属性を揃えて返す。
@@ -103,8 +106,15 @@ public enum AXBridge {
         scan.listError = error.map { "AXError(\($0.rawValue))" }
 
         for element in elements {
-            guard let id = AXPrivate.windowID(of: element) else {
+            let id: CGWindowID
+            do {
+                id = try AXPrivate.identifier(of: element)
+            } catch {
                 scan.missingIdentifier += 1
+                let reason = "\(error)"
+                if !scan.identifierErrors.contains(reason) {
+                    scan.identifierErrors.append(reason)
+                }
                 continue
             }
             guard let attributes = readWindowAttributes(element) else {
@@ -117,7 +127,40 @@ public enum AXBridge {
         return scan
     }
 
+    /// アプリが今フォーカスしているウィンドウの ID。
+    ///
+    /// `AXApplicationActivated` は「どのアプリが前面に来たか」しか伝えないので、
+    /// ウィンドウを特定するにはここで1往復して問い合わせる。
+    public static func focusedWindowID(of application: AXUIElement) -> CGWindowID? {
+        var raw: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(
+                application, AXAttribute.focusedWindow as CFString, &raw) == .success,
+            let value = raw, CFGetTypeID(value) == AXUIElementGetTypeID()
+        else { return nil }
+        // CF 型への条件付きキャストは中身に関わらず常に成功してしまうため、
+        // 確認は `CFGetTypeID` で行うしかない。
+        return AXPrivate.windowID(of: value as! AXUIElement)
+    }
+
     // MARK: - 書き込み
+
+    /// ウィンドウを前面に出してフォーカスする。
+    ///
+    /// `AXMain` の設定だけでは前面に来ないことがあり、`AXRaise` だけでは
+    /// キー入力の宛先が変わらない。両方を行う。
+    ///
+    /// - Important: **アプリ自体のアクティブ化はここではできない。**
+    ///   `NSRunningApplication.activate()` はメインスレッド専用なので呼び出し側で行う。
+    ///   これをしないとキー入力が前のアプリに届き続ける。
+    @discardableResult
+    public static func focus(_ element: AXUIElement) -> Bool {
+        let isMain =
+            AXUIElementSetAttributeValue(element, AXAttribute.main as CFString, kCFBooleanTrue)
+            == .success
+        let raised = AXUIElementPerformAction(element, AXAction.raise as CFString) == .success
+        return isMain && raised
+    }
 
     /// ウィンドウを目標矩形へ動かす。
     ///

@@ -80,10 +80,13 @@ public final class AXObserverHub {
     private var retainedSelf: UnsafeMutableRawPointer?
 
     private let applierPool: ApplierPool
+    /// AX メッセージングのタイムアウト（秒）。ハングしたアプリを待ち続けないための上限。
+    private let messagingTimeout: Float
     private let log: Log
 
-    public init(applierPool: ApplierPool, log: Log = .shared) {
+    public init(applierPool: ApplierPool, messagingTimeout: Float = 0.1, log: Log = .shared) {
         self.applierPool = applierPool
+        self.messagingTimeout = messagingTimeout
         self.log = log
     }
 
@@ -117,10 +120,11 @@ public final class AXObserverHub {
 
         let box = AXObserverBox(observer)
         let pointer = SendablePointer(raw: selfPointer())
+        let timeout = messagingTimeout
         applierPool.queue(for: pid).async {
             // AXObserverAddNotification は IPC を伴うので PID キュー上で行う。
             // AXObserverCreate とランループ登録はローカル処理なのでメインで済ませてある。
-            AXBridge.setMessagingTimeout(0.1, for: application.raw)
+            AXBridge.setMessagingTimeout(timeout, for: application.raw)
             for name in applicationNotifications {
                 AXObserverAddNotification(box.raw, application.raw, name as CFString, pointer.raw)
             }

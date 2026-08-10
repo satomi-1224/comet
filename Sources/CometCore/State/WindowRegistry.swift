@@ -15,6 +15,9 @@ public struct WindowRecord: Equatable, Sendable {
     public var bundleID: String?
     /// AX 通知で観測した実際の矩形。目標との突き合わせに使う。
     public var observedFrame: CGRect?
+    /// 所属ワークスペース。**これが唯一の正**で、各ワークスペースのツリーは
+    /// ここから ``TreeSync`` で導出される。
+    public var workspace: WorkspaceID
 
     public init(
         id: CGWindowID,
@@ -22,7 +25,8 @@ public struct WindowRecord: Equatable, Sendable {
         disposition: WindowDisposition,
         title: String? = nil,
         bundleID: String? = nil,
-        observedFrame: CGRect? = nil
+        observedFrame: CGRect? = nil,
+        workspace: WorkspaceID = 1
     ) {
         self.id = id
         self.pid = pid
@@ -30,6 +34,7 @@ public struct WindowRecord: Equatable, Sendable {
         self.title = title
         self.bundleID = bundleID
         self.observedFrame = observedFrame
+        self.workspace = workspace
     }
 }
 
@@ -116,6 +121,25 @@ public final class WindowRegistry {
     /// タイル対象だけを登録順で返す。レイアウト計算の入力になる。
     public var tiledIDs: [CGWindowID] {
         order.filter { records[$0]?.disposition.isTiled == true }
+    }
+
+    /// 指定ワークスペースのタイル対象を登録順で返す。
+    public func tiledIDs(in workspace: WorkspaceID) -> [CGWindowID] {
+        order.filter {
+            guard let record = records[$0] else { return false }
+            return record.disposition.isTiled && record.workspace == workspace
+        }
+    }
+
+    /// 指定ワークスペースの**画面に出しうる**ウィンドウを登録順で返す。
+    ///
+    /// タイルとフローティングの両方を含む。管理対象外（ダイアログなど）は
+    /// 位置を触らないので含めない。切替時の退避対象がこれになる。
+    public func visibleIDs(in workspace: WorkspaceID) -> [CGWindowID] {
+        order.filter {
+            guard let record = records[$0], record.workspace == workspace else { return false }
+            return record.disposition.isTiled || record.disposition.isFloating
+        }
     }
 
     public func ids(pid: pid_t) -> [CGWindowID] {
