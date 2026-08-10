@@ -80,7 +80,8 @@ public enum AXPrivate {
             case .axError(let error):
                 switch error {
                 case .apiDisabled: "アクセシビリティ権限が無効"
-                case .illegalArgument: "引数が不正（権限が外れている疑い。再ビルド後に頻発する）"
+                case .illegalArgument:
+                    "引数が不正（疑似ウィンドウか、権限が外れている。全滅なら後者）"
                 case .invalidUIElement: "要素が無効（疑似ウィンドウか、すでに破棄されている）"
                 case .cannotComplete: "応答が得られない（アプリがビジーかタイムアウト）"
                 case .notImplemented: "アプリがこの問い合わせに対応していない"

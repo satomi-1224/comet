@@ -2,13 +2,15 @@
 
 > 最終更新: 2026-08-11
 >
-> **次にやること**: **`./scripts/make-signing-cert.sh` を実行して固定の署名 ID を作る。**
-> ad-hoc 署名は再ビルドごとに identifier が変わるためアクセシビリティ権限が外れ、
-> 実機検証が通せない。これが唯一の障害で、実装は Phase 6 まで揃っている。
->
-> 署名 ID ができたら `./scripts/build-app.sh release` → `README.md` のセットアップ手順 →
-> 各 Phase の「未検証項目」の表を上から潰す。
+> **次にやること**: 実機検証。**検証には必ず `build/comet.app` を使う**（下記）。
+> 実装は Phase 6 まで揃っており、あとは各 Phase の「未検証項目」を潰すだけ。
 > 状態の確認は `ctrl-alt-shift-r`（全ワークスペースの状態をログに出す）。
+>
+> ```bash
+> ./scripts/build-app.sh debug
+> osascript -e 'quit app "AeroSpace"'
+> build/comet.app/Contents/MacOS/comet --log-level debug
+> ```
 > 設計の全体像は [DESIGN.md](DESIGN.md)、使い方は [README.md](README.md)
 
 ## 進め方の規約
@@ -829,7 +831,8 @@ TOML が壊れている間は**現状の設定を使い続ける**。編集途�
 | **`/bin/bash` は 3.2** | `set -u` のもとで空配列の `"${arr[@]}"` 展開がエラーになる。`${#arr[@]}` で分岐すること |
 | **署名 ID が未作成** | 現在 ad-hoc 署名のため**再ビルドのたびにアクセシビリティ権限が外れる**。`./scripts/make-signing-cert.sh` を一度実行すると解消（キーチェーンのパスワード入力が必要なため手動） |
 | **AeroSpace が稼働中** | 開発中は停止しないとホットキーとウィンドウ配置を奪い合う。Phase 0 の既定バインドを `ctrl-alt-shift-*` にしているのはこのため。なお `alt-h` 等は AeroSpace が動いていても**登録に成功する**（16/16 成功を実測）ので、両方が反応してしまう |
-| **ad-hoc 署名で権限が外れる仕組み** | identifier が `comet-<内容ハッシュ>` になるため、再ビルドすると TCC から別アプリとして扱われる。このとき `AXIsProcessTrusted()` は `true` を返し、`AXWindows` も読めるのに `_AXUIElementGetWindow` だけが `kAXErrorIllegalArgument`(-25201) を返す、という分かりにくい壊れ方をする |
+| **素の実行ファイルは権限を保てない（重要）** | `.build/debug/comet` の ad-hoc 署名は identifier が `comet-<内容ハッシュ>` になるため、**再ビルドごとに TCC から別アプリとして扱われる**。このとき `AXIsProcessTrusted()` は `true` を返し `AXWindows` も読めるのに、`_AXUIElementGetWindow` だけが `kAXErrorIllegalArgument`(-25201) を返す、という分かりにくい壊れ方をする |
+| **アプリバンドルなら権限が続く（実測）** | `build/comet.app` は `codesign --identifier local.comet` で identifier が固定されるため、**ad-hoc 署名でも再ビルドをまたいで権限が維持される**。実測で3枚のウィンドウを認識できた。**実機検証は必ずアプリバンドルで行う。** `make-signing-cert.sh` は「ダイアログを減らす」ための改善で、必須ではない |
 | **合成キーの経路** | `osascript` の System Events 経由のキー送出は、送る側に別途アクセシビリティ権限が必要。Phase 0 で使った `CGEvent` 直接送出とは別の権限になる。押せない環境では `--run <command>` でコマンドの経路を通せる |
 | **増分ビルドが壊れる** | **既存の struct にフィールドを足すと、テストバンドルが signal 11 で落ちる。** 落ちる場所は毎回変わり、変更したコードとは無関係なテスト名が出る（`Bool` 2つを足した純粋な struct で再現）。`swift package clean` で解消する。原因はレイアウト変更に一部のモジュールが追従しないため |
 
