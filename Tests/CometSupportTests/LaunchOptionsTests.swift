@@ -38,6 +38,16 @@ struct LaunchOptionsTests {
         #expect(try LaunchOptions.parse([]).commands.isEmpty)
     }
 
+    @Test("検証用の送出オプションを解釈する")
+    func emitOptions() throws {
+        #expect(try LaunchOptions.parse(["--emit-key", "alt-ctrl-l:20"]).emitKey == "alt-ctrl-l:20")
+        #expect(try LaunchOptions.parse(["--emit-key=alt-h"]).emitKey == "alt-h")
+        #expect(
+            try LaunchOptions.parse(["--emit-drag", "100,200:-50,0"]).emitDrag == "100,200:-50,0")
+        #expect(try LaunchOptions.parse([]).emitKey == nil)
+        #expect(try LaunchOptions.parse([]).emitDrag == nil)
+    }
+
     @Test("設定ファイルに関するオプションを解釈する")
     func configOptions() throws {
         #expect(try LaunchOptions.parse(["--config", "/tmp/a.toml"]).configPath == "/tmp/a.toml")

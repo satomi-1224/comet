@@ -1242,6 +1242,11 @@ public final class Engine: WindowResolving {
             logDryRun(targets: targets, order: order)
             return
         }
+        // 実運用でも目標を残す。「何を要求したか」が分からないと、ずれの原因が
+        // レイアウト計算なのかアプリ側なのか切り分けられない。
+        if log.isEnabled(.trace) {
+            logTargets(targets: targets, order: order, level: .trace, prefix: "目標")
+        }
         // 新規ウィンドウを先頭へ回す。デフォルト位置に出ている時間がそのまま
         // ちらつきとして見えるので、他より先に動かす（症状A）。
         if !priorityWindows.isEmpty {
@@ -1442,13 +1447,20 @@ public final class Engine: WindowResolving {
 
     private func logDryRun(targets: [CGWindowID: TargetFrame], order: [CGWindowID]) {
         log.info("[dry-run] ワークスペース \(workspaces.activeID) / \(order.count) 枚の配置を計算した")
+        logTargets(targets: targets, order: order, level: .info, prefix: "[dry-run] ")
+    }
+
+    private func logTargets(
+        targets: [CGWindowID: TargetFrame], order: [CGWindowID], level: LogLevel, prefix: String
+    ) {
         for id in order {
             guard let target = targets[id] else { continue }
             let rect = target.rect
             let title = registry[id]?.title ?? "?"
             let mark = registry[id]?.workspace == workspaces.activeID ? " " : "退避"
-            log.info(
-                "[dry-run]  \(mark) [\(id)] \(title.prefix(40)) → "
+            log.log(
+                level,
+                "\(prefix) \(mark) [\(id)] \(title.prefix(40)) → "
                     + "(\(Int(rect.minX)), \(Int(rect.minY))) \(Int(rect.width))x\(Int(rect.height))")
         }
     }

@@ -53,6 +53,14 @@ public struct LaunchOptions: Equatable, Sendable {
     public var ignoreConfig: Bool = false
     /// 組み込みの既定設定を出力して終了する。設定ファイルの雛形になる。
     public var printDefaultConfig: Bool = false
+    /// 検証用: 合成キーを送って終了する。`spec:count` の形（count は省略可）。
+    ///
+    /// イベントの送出には送る側にアクセシビリティ権限が要る。権限を持つのは
+    /// comet 自身なので、この口を製品バイナリに置いている。
+    public var emitKey: String?
+    /// 検証用: 合成ドラッグを送って終了する。`x,y:dx,dy` の形。
+    public var emitDrag: String?
+
     /// 起動後に実行するコマンド。複数回指定でき、書いた順に実行される。
     ///
     /// ホットキーを押せない環境（合成キーの送出に別の権限が要る）でも
@@ -82,9 +90,16 @@ public struct LaunchOptions: Equatable, Sendable {
                                 他のウィンドウマネージャが動いている環境での検証用。
           --preview-layout <n>  n 枚のときのレイアウトを図示して終了する。
                                 ウィンドウには一切触れない。
-          --run <command>        起動後にコマンドを実行する。複数回指定でき順に実行する。
+          --run <command>       起動後にコマンドを実行する。複数回指定でき順に実行する。
                                 例: --run "workspace 2" --run "move left"
                                 ホットキーを押せない環境での検証用。
+
+        検証用（送って終了する。常駐しない）:
+          --emit-key <spec[:n]> 合成キーを送る。n を 2 以上にするとキー連射を再現する。
+                                例: --emit-key alt-ctrl-l:20
+          --emit-drag <x,y:dx,dy>
+                                合成ドラッグを送る。座標は左上原点。
+                                例: --emit-drag 1278,860:-200,0
           --print-keys          指定できるキー名を一覧表示して終了する
           --help, -h            このヘルプを表示して終了する
 
@@ -131,6 +146,10 @@ public struct LaunchOptions: Equatable, Sendable {
                     options.configPath = value
                 case "--run":
                     options.commands.append(value)
+                case "--emit-key":
+                    options.emitKey = value
+                case "--emit-drag":
+                    options.emitDrag = value
                 default:
                     throw LaunchOptionsError.unknownFlag(flag)
                 }
@@ -174,6 +193,12 @@ public struct LaunchOptions: Equatable, Sendable {
 
             case "--run":
                 options.commands.append(try takeValue(args, after: &index, flag: arg))
+
+            case "--emit-key":
+                options.emitKey = try takeValue(args, after: &index, flag: arg)
+
+            case "--emit-drag":
+                options.emitDrag = try takeValue(args, after: &index, flag: arg)
 
             case "--preview-layout":
                 let value = try takeValue(args, after: &index, flag: arg)

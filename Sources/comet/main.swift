@@ -76,6 +76,51 @@ if options.printDefaultConfig {
     exit(0)
 }
 
+// MARK: - 検証用のイベント送出
+
+// **インスタンスロックより前に処理して終了する。** 常駐している comet へイベントを
+// 送るための一発起動なので、ロックを取ると自分自身に弾かれる。
+if let spec = options.emitKey {
+    let parts = spec.split(separator: ":", maxSplits: 1)
+    let count = parts.count > 1 ? Int(parts[1]) ?? 1 : 1
+    do {
+        let hotkey = try KeySpec.parse(String(parts[0]))
+        // 送出にも権限が要る。無いと post は黙って何もしないので、必ず確かめる。
+        guard AXPermission.isTrusted() else {
+            FileHandle.standardError.write(
+                Data("送出側にアクセシビリティ権限が無い。イベントは届かない\n".utf8))
+            exit(3)
+        }
+        let sent = SyntheticEvents.postKey(hotkey, count: count)
+        print("送出: \(hotkey) を \(sent) 回（権限あり）")
+        exit(0)
+    } catch {
+        FileHandle.standardError.write(Data("キー指定を解釈できない: \(error)\n".utf8))
+        exit(2)
+    }
+}
+
+if let spec = options.emitDrag {
+    // "x,y:dx,dy"
+    let halves = spec.split(separator: ":", maxSplits: 1)
+    let from = halves.first.map { $0.split(separator: ",").compactMap { Double($0) } } ?? []
+    let delta = halves.count > 1 ? halves[1].split(separator: ",").compactMap { Double($0) } : []
+    guard from.count == 2, delta.count == 2 else {
+        FileHandle.standardError.write(Data("--emit-drag は x,y:dx,dy の形で指定する\n".utf8))
+        exit(2)
+    }
+    let start = CGPoint(x: from[0], y: from[1])
+    let end = CGPoint(x: from[0] + delta[0], y: from[1] + delta[1])
+    guard AXPermission.isTrusted() else {
+        FileHandle.standardError.write(
+            Data("送出側にアクセシビリティ権限が無い。イベントは届かない\n".utf8))
+        exit(3)
+    }
+    SyntheticEvents.postDrag(from: start, to: end)
+    print("送出: ドラッグ (\(Int(start.x)),\(Int(start.y))) → (\(Int(end.x)),\(Int(end.y)))")
+    exit(0)
+}
+
 // MARK: - 設定
 
 // 設定の誤りで起動を止めない。読めなかった項目は既定値に落ちて `problems` に理由が残る。
@@ -262,14 +307,43 @@ if engine.isTimingEnabled {
 
 // 複数コマンドの割り当ては**まとめて1回の再配置**にする。中間状態を適用しないことで
 // 「ウィンドウ移動 + 切替」が1フレームで完了する（設計書 §9.5）。
+// 押しっぱなしでコマンドを繰り返すための仕掛け。
+//
+// **Carbon のホットキーはキー連射では繰り返し発火しない**（実測で 15 回送って 1 回）。
+// `alt-ctrl-l` を押しっぱなしにしてリサイズを追従させるには自分で繰り返すしかない。
+let repeater = HotkeyRepeater()
+hotkeyManager.onRelease = { hotkey in
+    repeater.end(hotkey)
+}
+
+/// 押しっぱなしで繰り返してよいコマンドか。
+///
+/// 繰り返すのは **`resize` だけ**にする。`move` や `workspace` が連射されると
+/// ウィンドウが飛んでいって収拾がつかない。
+@MainActor
+func isRepeatable(_ commands: [Command]) -> Bool {
+    !commands.isEmpty
+        && commands.allSatisfy {
+            if case .resize = $0 { return true }
+            return false
+        }
+}
+
 @MainActor
 func registerConfiguredHotkeys(_ bindings: [Binding]) {
     var bound = 0
     for binding in bindings {
+        let repeatable = isRepeatable(binding.commands)
         do {
-            try hotkeyManager.register(binding.hotkey) { _ in
+            try hotkeyManager.register(binding.hotkey) { hotkey in
                 for command in binding.commands {
                     engine.execute(command)
+                }
+                guard repeatable else { return }
+                repeater.begin(hotkey) {
+                    for command in binding.commands {
+                        engine.execute(command)
+                    }
                 }
             }
             Log.shared.debug("登録: \(binding.spec) → \(binding.commands.count) コマンド")
@@ -313,6 +387,7 @@ func terminateAfterRestoringWindows(reason: String) {
             Log.shared.info("計測: \(line)")
         }
     }
+    repeater.stopAll()
     configWatcher.stop()
     decoration.stop()
     let restored = engine.prepareForTermination()
@@ -412,6 +487,7 @@ func reloadConfiguration() {
     }
 
     // ホットキーは全解除して張り直す。差分を取るより確実。
+    repeater.stopAll()
     hotkeyManager.unregisterAll()
     registerConfiguredHotkeys(reloaded.bindings)
     registerControlHotkeys()

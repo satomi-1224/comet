@@ -33,8 +33,11 @@ Xcode を入れていない場合、SPM は `Testing.framework` を自動では�
 ## 使い方
 
 ```bash
-# テスト
+# 単体テスト
 ./scripts/test.sh
+
+# 実機検証（AeroSpace を止めて実際に動かし、終わったら戻す）
+./scripts/verify.sh
 
 # .app を組み立てる（アクセシビリティ権限に必要）
 ./scripts/build-app.sh release
@@ -78,6 +81,8 @@ log stream --predicate 'subsystem == "local.comet"'
 | `--preview-layout <n>` | n 枚のときの配置を図示して終了。**ウィンドウには一切触れない** |
 | `--dry-run` | 配置を計算するがウィンドウは動かさない。他の WM が動いている環境での検証用 |
 | `--run <command>` | 起動後にコマンドを実行する。複数回指定可。ホットキーを押せない環境での検証用 |
+| `--emit-key <spec[:n]>` | 合成キーを送って終了する。n を 2 以上にすると押しっぱなしを再現する（検証用） |
+| `--emit-drag <x,y:dx,dy>` | 合成ドラッグを送って終了する（検証用） |
 | `--hotkey <spec>` | 押下をログに出すだけの確認用ホットキー。複数回指定可 |
 | `--print-keys` | 指定できるキー名を一覧表示 |
 | `--help` | ヘルプ |

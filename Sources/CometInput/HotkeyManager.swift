@@ -25,9 +25,14 @@ private let hotkeyEventCallback: EventHandlerUPP = {
     )
     guard status == noErr else { return status }
 
+    let isPressed = GetEventKind(event) == UInt32(kEventHotKeyPressed)
     let manager = Unmanaged<HotkeyManager>.fromOpaque(userData).takeUnretainedValue()
     MainActor.assumeIsolated {
-        manager.dispatch(identifier: hotKeyID.id)
+        if isPressed {
+            manager.dispatch(identifier: hotKeyID.id)
+        } else {
+            manager.dispatchRelease(identifier: hotKeyID.id)
+        }
     }
     return noErr
 }
@@ -41,6 +46,13 @@ private let hotkeyEventCallback: EventHandlerUPP = {
 public final class HotkeyManager {
 
     public typealias Handler = @MainActor (Hotkey) -> Void
+
+    /// ホットキーが離されたときに呼ばれる。
+    ///
+    /// **Carbon の `kEventHotKeyPressed` はキー連射では繰り返し発火しない**（実測で
+    /// 15回送って1回）。押しっぱなしでの追従を得るには、離されるまで呼び出し側が
+    /// 自分で繰り返すしかない。そのための合図。
+    public var onRelease: (@MainActor (Hotkey) -> Void)?
 
     public enum ManagerError: Error, Equatable, CustomStringConvertible {
         case notStarted
@@ -103,16 +115,21 @@ public final class HotkeyManager {
         guard eventHandler == nil else { return }
 
         let pointer = Unmanaged.passRetained(self).toOpaque()
-        var spec = EventTypeSpec(
-            eventClass: OSType(kEventClassKeyboard),
-            eventKind: UInt32(kEventHotKeyPressed)
-        )
+        // 押下と**離し**の両方を受ける。離しを取らないと「押しっぱなし」を検出できない。
+        var specs = [
+            EventTypeSpec(
+                eventClass: OSType(kEventClassKeyboard),
+                eventKind: UInt32(kEventHotKeyPressed)),
+            EventTypeSpec(
+                eventClass: OSType(kEventClassKeyboard),
+                eventKind: UInt32(kEventHotKeyReleased)),
+        ]
         var handlerRef: EventHandlerRef?
         let status = InstallEventHandler(
             GetApplicationEventTarget(),
             hotkeyEventCallback,
-            1,
-            &spec,
+            specs.count,
+            &specs,
             pointer,
             &handlerRef
         )
@@ -211,5 +228,12 @@ public final class HotkeyManager {
         }
         log.trace("ホットキー発火: \(entry.hotkey)")
         entry.handler(entry.hotkey)
+    }
+
+    /// Carbon コールバックから呼ばれる（離し）。
+    fileprivate func dispatchRelease(identifier: UInt32) {
+        guard let entry = entries[identifier] else { return }
+        log.trace("ホットキー解放: \(entry.hotkey)")
+        onRelease?(entry.hotkey)
     }
 }
