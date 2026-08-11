@@ -86,11 +86,16 @@ struct ConfigLoaderTests {
         #expect(configuration.border.width <= configuration.gaps.innerVertical)
     }
 
-    @Test("既定のアプリ間ギャップは画面の縁より狭い")
-    func defaultInnerGapIsThinnerThanOuter() {
-        // アプリ同士は詰めて、画面の縁だけ少し空ける（実際の好みに合わせた既定）。
-        #expect(Configuration().gaps.innerHorizontal == 3)
-        #expect(Configuration().gaps.outerTop == 5)
+    @Test("既定の間隔はアプリ間も画面の縁も 3pt")
+    func defaultGapsAreUniform() {
+        // 実際の好みに合わせた既定。細くするときは枠線の幅（2pt）が下限。
+        let gaps = Configuration().gaps
+        #expect(gaps.innerHorizontal == 3)
+        #expect(gaps.innerVertical == 3)
+        #expect(gaps.outerTop == 3)
+        #expect(gaps.outerBottom == 3)
+        #expect(gaps.outerLeft == 3)
+        #expect(gaps.outerRight == 3)
     }
 
     @Test("gaps を読める")

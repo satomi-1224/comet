@@ -189,7 +189,7 @@ comet --print-default-config > ~/.config/comet/config.toml
 | 設定 | 内容 |
 |---|---|
 | `[gaps] inner-*` | アプリ間の間隔（既定 3）。**`[border] width` より広くすること**（枠線が隣の中身に重なる） |
-| `[gaps] outer-*` | 画面の縁との間隔（既定 5） |
+| `[gaps] outer-*` | 画面の縁との間隔（既定 3） |
 | `[performance] repeat-delay-ms` | ホットキーを押しっぱなしにしてから繰り返しが始まるまで（既定 250） |
 | `[performance] repeat-interval-ms` | 繰り返しの間隔（既定 30 ≒ 30Hz）。**保存しただけで効く** |
 | `[performance] ax-timeout-ms` | AX の応答待ちの上限（既定 100）。ハングしたアプリを短く見切る |
