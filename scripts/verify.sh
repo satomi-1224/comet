@@ -51,6 +51,13 @@ BORDER_COLOR="#ff00ff"
 BORDER_WIDTH=6
 BORDER_RADIUS=10
 
+# 壁紙の判定に使う単色。**画面に写り込まない色**にしておく。
+WALL_COLOR_1="#c02020"
+WALL_COLOR_2="#20a020"
+# 検証用の画像は片付けで消えるので、終わったらここへ戻す。
+SYSTEM_WALLPAPER="/System/Library/CoreServices/DefaultDesktop.heic"
+WALLPAPER_CHANGED=0
+
 # ---- 後片付け -------------------------------------------------------------
 # 途中で失敗しても AeroSpace と検証用ウィンドウは必ず片付ける。
 # ここを怠ると利用者の環境が壊れたままになる。
@@ -67,6 +74,7 @@ cleanup() {
   pkill -INT -f "comet.app/Contents/MacOS/comet" 2>/dev/null || true
   sleep 2
   close_test_windows
+  restore_wallpaper
   if [ "$AEROSPACE_WAS_RUNNING" = "1" ] && ! pgrep -f AeroSpace >/dev/null; then
     echo "==> AeroSpace を戻す"
     open -a AeroSpace 2>/dev/null
@@ -143,9 +151,51 @@ OSA
 close_test_windows() {
   if [ "$TEXTEDIT_WAS_RUNNING" = "1" ]; then return 0; fi
   if [ -z "$CREATED_WINDOW_IDS" ]; then return 0; fi
-  # 中身が空の書類しか無いので保存を訊かれずに終わる。
-  osascript -e 'tell application "TextEdit" to quit' >/dev/null 2>&1 || true
+  # **`saving no` が要る。** 合成キー（ctrl-alt-shift-*）の一部が書類に文字を
+  # 入れてしまい、変更あり扱いで quit が保存ダイアログに阻まれる（実測 -128）。
+  # ここへ来るのは TextEdit が動いていなかった場合だけなので、
+  # 開いている書類は全て検証で作ったもの。捨ててよい。
+  osascript -e 'tell application "TextEdit" to close every document saving no' \
+    >/dev/null 2>&1 || true
+  sleep 1
+  osascript -e 'tell application "TextEdit" to quit saving no' >/dev/null 2>&1 || true
+  sleep 2
+  # それでも残るなら強制終了する（書類は破棄済みなので失うものは無い）。
+  # 残したままにすると次の実行が「利用者の TextEdit」と誤認して検証を省略する。
+  if pgrep -x TextEdit >/dev/null; then
+    killall TextEdit >/dev/null 2>&1 || true
+    sleep 1
+  fi
   CREATED_WINDOW_IDS=""
+}
+
+# 検証で変えた壁紙を macOS 既定へ戻す。
+#
+# **`osascript` の `set picture of current desktop` は効かない**（実測: 設定しても
+# 変わらないまま）。効くのは `NSWorkspace.setDesktopImageURL` なので comet に
+# 設定させる。`--dry-run` なら内蔵UI だけが動き、他のアプリのウィンドウには触らない。
+#
+# 検証用の画像は片付けで消えるので、**消えたファイルを指したまま終わらせない**
+# （デスクトップが真っ黒になりうる）。
+restore_wallpaper() {
+  if [ "$WALLPAPER_CHANGED" = "0" ]; then return 0; fi
+  if [ ! -f "$SYSTEM_WALLPAPER" ]; then return 0; fi
+  local config
+  config="$(mktemp /tmp/comet-restore.XXXXXX)"
+  cat >"$config" <<TOML
+[workspaces]
+count = 1
+
+[wallpaper.map]
+1 = "$SYSTEM_WALLPAPER"
+TOML
+  "$APP" --config "$config" --dry-run --log-level warn >/dev/null 2>&1 &
+  sleep 4
+  pkill -INT -f "comet.app/Contents/MacOS/comet" 2>/dev/null || true
+  sleep 1
+  rm -f "$config"
+  WALLPAPER_CHANGED=0
+  echo "    壁紙を macOS 既定（$(basename "$SYSTEM_WALLPAPER")）に戻した"
 }
 
 # ---- 判定 ---------------------------------------------------------------
@@ -245,6 +295,18 @@ border_coverage() {
     --inset $(((BORDER_RADIUS + 4) * CAPTURE_SCALE)) --tolerance 24 2>/dev/null
 }
 
+# 画面中央がその色でどれだけ埋まっているか（百分率）。壁紙の判定に使う。
+# 中央を見るのは、上下端のメニューバーや Dock を避けるため。
+desktop_fill() {
+  local png="$1" color="$2" region out count area
+  region="$(scale_rect "$((SCREEN_W / 2 - 100)),$((SCREEN_H / 2 - 100)),200,200")"
+  out="$("$PROBE" bbox "$png" "$color" --tolerance 40 --region "$region" 2>/dev/null || true)"
+  count="$(field "$out" count)"
+  [ -n "$count" ] || count=0
+  area=$((200 * CAPTURE_SCALE * 200 * CAPTURE_SCALE))
+  echo $((count * 100 / area))
+}
+
 # comet を起動してログが落ち着くまで待つ。第2引数はログレベル。
 start_comet() {
   local log="$1" level="$2"
@@ -319,6 +381,7 @@ ctrl-alt-shift-u = "focus right"
 ctrl-alt-shift-1 = "workspace 1"
 ctrl-alt-shift-2 = "workspace 2"
 ctrl-alt-shift-m = "move-node-to-workspace 2"
+ctrl-alt-shift-3 = "workspace 3"
 TOML
 
 # 撮った画像と comet の座標を突き合わせるための倍率。
@@ -332,6 +395,7 @@ SCREEN_INFO="$("$PROBE" screen)"
 SCREEN_W="$(field "$SCREEN_INFO" w)"
 # 表示領域の上端 = メニューバーの高さ。インジケータを探す帯として使う。
 MENUBAR_H="$(field "$SCREEN_INFO" visible-y)"
+SCREEN_H="$(field "$SCREEN_INFO" h)"
 CAPTURE_W="$(field "$("$PROBE" size "$WORK/scale.png")" w)"
 CAPTURE_SCALE=$((CAPTURE_W / SCREEN_W))
 if [ "$CAPTURE_SCALE" -lt 1 ] || [ $((SCREEN_W * CAPTURE_SCALE)) -ne "$CAPTURE_W" ]; then
@@ -613,16 +677,22 @@ stop_comet
 # ---- 9. 症状A（新規ウィンドウのちらつき） ---------------------------------
 # 「目視でしか判定できない」としていた最後の症状。
 #
-# **ちらつきの実体は「最終的に落ち着く位置とは違う場所に、画面上に居た時間」**
-# なので、ウィンドウの矩形を細かく追えば数値になる。追跡は CGWindowList を
-# 8ms 間隔で読む（comet とは独立した観測で、権限も要らない）。
+# **ちらつきの実体は「現れた位置から動き出すまでの時間」**（first-pos-ms）。
+# 追跡は CGWindowList を 4ms 間隔で読む（comet とは独立した観測で、権限も要らない）。
+#
+# 「落ち着くまで」で測ってはいけない。アプリは新しいウィンドウを拡大アニメーションで
+# 出すことがあり、comet が位置を決めたあとも目標へ収束する途中の矩形が観測される。
+# それを数えると**アプリのアニメーションまでちらつきに計上する**
+# （実測: TextEdit で 19ms のところを 86ms と報告していた）。
 echo "==> 9. 症状A（新規ウィンドウが既定位置に見えていた時間）"
 if [ -z "$CREATED_WINDOW_IDS" ]; then
   skip "検証用ウィンドウを開いていないので新規ウィンドウを作れない"
 else
 start_comet "$WORK/9.log" trace
 BEFORE_IDS="$(textedit_window_ids)"
-"$PROBE" watch --new --ms 4000 --interval-ms 8 --min-area 120000 >"$WORK/9-watch.txt" 2>&1 &
+# 許容差を少し大きく取る。出現直後の数 px の伸縮を「動き出した」と数えないため。
+"$PROBE" watch --new --ms 4000 --interval-ms 4 --min-area 120000 --tolerance 8 \
+  >"$WORK/9-watch.txt" 2>&1 &
 WATCH_PID=$!
 sleep 0.6
 osascript -e 'tell application "TextEdit" to make new document' >/dev/null 2>&1 || true
@@ -650,8 +720,9 @@ else
   echo "        現れた位置 $FIRST_RECT → 落ち着いた位置 $FINAL_RECT"
   # 「動かなかった」で通ってしまわないように、**タイルされたことを先に確かめる。**
   expect_rect_near "$FINAL_RECT" "$NEW_TARGET" 2 "新規ウィンドウがレイアウトの位置に収まった"
-  expect_le "$(field "$SUMMARY" other-ms)" 150 "既定位置に見えていた時間(ms)"
-  expect_le "$(field "$SUMMARY" settle-ms)" 200 "落ち着くまでの時間(ms)"
+  expect_le "$(field "$SUMMARY" first-pos-ms)" 50 "既定位置に見えていた時間(ms)＝症状A"
+  # 参考値。アプリの表示アニメーションを含むので、これで症状A は判定しない。
+  echo "        落ち着くまで $(field "$SUMMARY" settle-ms)ms（アプリの表示アニメーションを含む）"
 fi
 stop_comet
 fi
@@ -718,38 +789,71 @@ fi
 fi
 
 # ---- 11. 壁紙（症状D） ----------------------------------------------------
-# 画像を置けば機械で判定できる（空のワークスペースへ切り替えれば画面いっぱいが壁紙になる）。
+# 空のワークスペースへ切り替えると画面いっぱいが壁紙になるので、画素で判定できる。
 #
-# **ただし今の macOS では元の壁紙を読み出せない**（`picture of current desktop` が
-# `missing value` を返す。動的な壁紙だと単一のパスが無い）。戻せないものは変えない。
-# 登録の経路だけを確かめ、見え方の判定は理由を添えて省略する。
+# **単色の画像を使う。** 写真だと拡大や切り抜きの仕方で写り方が変わるが、
+# 単色なら埋め方に関係なく同じ色になるので「どの壁紙が出ているか」が確実に分かる。
+#
+# 画像は**2枚**にしてワークスペースは3つにする。3つ目が1枚目に戻ることで
+# 「足りなければ先頭から繰り返す」も同時に確かめられる。
 echo "==> 11. 壁紙（症状D）"
-sips -s format png --resizeHeightWidthMax 64 /System/Library/CoreServices/DefaultDesktop.heic \
-  --out "$WORK/wall2.png" >/dev/null 2>&1 || true
-if [ ! -f "$WORK/wall2.png" ]; then
-  # 手近な画像が無ければ自分で作る（1x1 の PNG でも登録の確認には足りる）。
-  printf '\x89PNG\r\n\x1a\n' >"$WORK/wall2.png"
-fi
+WALL_DIR="$WORK/wallpapers"
+mkdir -p "$WALL_DIR"
+"$PROBE" solid "$WALL_DIR/1.png" 400x300 "$WALL_COLOR_1" >/dev/null
+"$PROBE" solid "$WALL_DIR/2.png" 400x300 "$WALL_COLOR_2" >/dev/null
+# 画像以外を混ぜても数に入らないこと（ここが崩れると割り当てがずれる）。
+echo "これは画像ではない" >"$WALL_DIR/memo.txt"
+# **壁紙の設定は節11 の中だけに閉じ込める。** 設定を足したままにすると、
+# 後続の節で comet を起動したときに検証用の画像を貼り直してしまい、
+# 片付けで消えたファイルを指したまま終わる（実際にこれで真っ黒になりかけた）。
+cp "$CONFIG" "$WORK/config-without-wallpaper.toml"
 cat >>"$CONFIG" <<TOML
 
+[wallpaper]
+dir = "$WALL_DIR"
+
 [wallpaper.map]
-2 = "$WORK/wall2.png"
-3 = "$WORK/存在しない.png"
+9 = "$WORK/存在しない.png"
 TOML
+WALLPAPER_CHANGED=1
 start_comet "$WORK/11.log" debug
-expect_log "$WORK/11.log" "壁紙を 1 件登録した" "実在する壁紙だけを登録した"
-expect_log "$WORK/11.log" "ワークスペース 3 の壁紙が見つからない" "存在しないパスを警告して捨てた"
-ORIGINAL_WALLPAPER="$(osascript -e 'tell application "System Events" to get picture of current desktop' 2>/dev/null || true)"
-if [ -z "$ORIGINAL_WALLPAPER" ] || [ "$ORIGINAL_WALLPAPER" = "missing value" ]; then
-  skip "今の壁紙を読み出せない（戻せないので実際には切り替えない）"
+expect_log "$WORK/11.log" "壁紙のディレクトリから 2 枚を 3 ワークスペースへ割り当てた" \
+  "ディレクトリの画像を名前順に割り当てた（画像以外は数に入れない）"
+expect_log "$WORK/11.log" "ワークスペース 9 の壁紙が見つからない" "存在しないパスを警告して捨てた"
+
+if [ "$CAPTURE_SCALE" = "0" ]; then
+  skip "撮影の倍率が整数でないため壁紙の画素の判定を省いた"
 else
+  # ワークスペース 2 へ。**切替の直後に撮る**（症状D は「ワンテンポ遅れる」ことなので、
+  # 落ち着いてから撮ると遅れを見逃す）。
   "$APP" --emit-key ctrl-alt-shift-2 >/dev/null 2>&1
+  capture "$WORK/11-ws2-immediate.png"
   sleep 2
-  expect_log "$WORK/11.log" "壁紙を切り替えた" "ワークスペース切替で壁紙を切り替えた"
-  osascript -e "tell application \"System Events\" to set picture of current desktop to \"$ORIGINAL_WALLPAPER\"" \
-    >/dev/null 2>&1 || true
+  capture "$WORK/11-ws2.png"
+  expect_ge "$(desktop_fill "$WORK/11-ws2.png" "$WALL_COLOR_2")" 99 \
+    "ワークスペース2の壁紙が画面に出た"
+  # 遅れていれば「前の壁紙のまま」なので 0% 近くになる。実測 98% は、撮った瞬間に
+  # まだ隠れきっていないウィンドウが数%写り込むぶん（壁紙そのものは変わっている）。
+  #
+  # **この1つの数字が症状D と症状C の両方を示す。** 壁紙が変わっていなければ 0% に、
+  # ウィンドウが残っていれば大きく下がる。撮影は切替要求から ~150ms 後なので、
+  # 90% を超えていれば「切替はその時点で終わっている」と言える。
+  IMMEDIATE="$(desktop_fill "$WORK/11-ws2-immediate.png" "$WALL_COLOR_2")"
+  echo "        切替直後（~150ms 後）の撮影で ${IMMEDIATE}% が新しい壁紙"
+  expect_ge "$IMMEDIATE" 90 "切替と同時に壁紙が変わっている（症状D）"
+  expect_ge "$IMMEDIATE" 90 "切替直後に前のワークスペースのウィンドウが残っていない（症状C）"
+
+  # ワークスペース 3 へ。画像は2枚しか無いので1枚目に戻る。
+  "$APP" --emit-key ctrl-alt-shift-3 >/dev/null 2>&1
+  sleep 2
+  capture "$WORK/11-ws3.png"
+  expect_ge "$(desktop_fill "$WORK/11-ws3.png" "$WALL_COLOR_1")" 99 \
+    "画像が足りないワークスペースは先頭の画像に戻った（1231… の繰り返し）"
+  expect_log "$WORK/11.log" "壁紙を切り替えた: ワークスペース 3 → 1.png" "3つ目に1枚目を割り当てた"
 fi
 stop_comet
+cp "$WORK/config-without-wallpaper.toml" "$CONFIG"
+restore_wallpaper
 
 # ---- 12. ハングしたアプリに引きずられないか -------------------------------
 # 「時間のかかる検証」として後回しにしていた項目。**SIGSTOP で止めれば

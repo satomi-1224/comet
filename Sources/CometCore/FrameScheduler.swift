@@ -149,11 +149,16 @@ public final class FrameScheduler {
         }
 
         let timing = self.timing
+        // 発行と完了の時刻を残す。**「どこで時間を使ったか」を後から追えるようにする。**
+        // 同じ pid のウィンドウは直列に処理されるので、遅いアプリが混ざると
+        // 後続が待たされる。それが見えるのはこの2行だけ。
+        log.trace("適用を発行 [\(id)] \(rendered(target.rect))")
         applierPool.queue(for: pid).async {
             let result = AXBridge.applyFrame(
                 target.rect, setSize: target.setSize, verify: target.verify,
                 current: current, to: element.raw, timing: timing, pid: pid)
             Task { @MainActor in
+                self.log.trace("適用が完了 [\(id)]")
                 self.finish(id, target: target, result: result)
             }
         }

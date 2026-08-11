@@ -7,7 +7,7 @@ Swift 製の単一プロセスに置き換えることを目的とする。
 
 ## 現在の状態
 
-**Phase 6（常用化）まで実装済み。**
+**Phase 6（常用化）まで実装済み。潰すべき4症状はすべて実測で解消を確認した。**
 
 - ウィンドウを開くと自動でタイルされ、閉じると再配置される
 - `focus` / `move` / `resize` / `join-with` / `layout` が動く
@@ -18,6 +18,15 @@ Swift 製の単一プロセスに置き換えることを目的とする。
 - フォーカス枠線・ワークスペースインジケータ（メニューバー + HUD）・壁紙切替
 - 設定は**保存すると自動で読み直す**（ツリーの形は保たれる）
 - ログイン起動（`start-at-login = true`）
+
+置き換えの動機だった4症状は、`./scripts/verify.sh` で機械的に判定している。
+
+| | 症状 | 実測 |
+|---|---|---|
+| A | 新規ウィンドウがデフォルト位置に一瞬出てから飛ぶ | 既定位置に居るのは **14〜24ms**（1〜1.5フレーム） |
+| B | リサイズ連打で追従しない・飛ぶ・戻る | 押しっぱなしで約 **30Hz** 追従 |
+| C | ワークスペース切替が遅い・ちらつく | 切替から **~150ms** 後には前のウィンドウが残っていない |
+| D | 壁紙変更がワンテンポ遅れる | 同じ撮影で画面の **98%** が既に新しい壁紙 |
 
 進捗の詳細は [PROGRESS.md](PROGRESS.md)。
 
@@ -133,8 +142,8 @@ comet --print-default-config > ~/.config/comet/config.toml
 
 既定のキーバインドは現行 AeroSpace 設定の移植で、`alt-hjkl`（フォーカス）/
 `alt-shift-hjkl`（移動）/ `alt-ctrl-hjkl`（リサイズ）/ `alt-e`・`alt-w`（まとめる）/
-`alt-slash`（向きの切替）/ `alt-shift-f`（フローティング切替）。
-`workspace` 系は未実装なので、書いてあっても起動時に「未対応」として飛ばされる。
+`alt-slash`（向きの切替）/ `alt-shift-f`（フローティング切替）/
+`alt-1`..`alt-0`（ワークスペース切替）/ `alt-shift-1`..（移動して追従）/ `alt-tab`（直前へ）。
 
 **設定の誤りで起動は止まらない。** 解釈できなかった項目は既定値に落ち、
 理由が起動時のログに出る。
@@ -154,7 +163,21 @@ comet --print-default-config > ~/.config/comet/config.toml
 |---|---|
 | `[border]` | フォーカス中のウィンドウに重ねる枠線。線の幅だけ外側に広がるのでギャップの中に収まる |
 | `[indicator]` | ワークスペース番号。`menubar` / `hud` / `both` / `off` |
-| `[wallpaper.map]` | ワークスペース番号 → 画像パス。**未設定のワークスペースでは壁紙を変えない** |
+| `[wallpaper] dir` | 画像を入れたディレクトリ。**これだけ書けば済む** |
+| `[wallpaper.map]` | ワークスペース番号 → 画像パス。`dir` より優先する |
+
+```toml
+[wallpaper]
+dir = "~/Pictures/wallpapers"
+```
+
+ディレクトリの画像を**名前順**（Finder と同じ並びなので `2.png` が `10.png` より前）に
+ワークスペースの数まで取り、**足りなければ先頭から繰り返す**。
+3枚をワークスペース10個に割り当てると 1・2・3・1・2・3・1・2・3・1 になる。
+
+- 画像以外のファイル（`.DS_Store` やメモ）と隠しファイルは数に入れない
+- **ディレクトリが無い / 画像が1枚も無いときは壁紙を変えない**
+- 個別に差し替えたいワークスペースだけ `[wallpaper.map]` に書く
 
 壁紙のパスは起動時に実在を確認し、無いものは警告して捨てる。
 
@@ -255,7 +278,7 @@ tccutil reset Accessibility local.comet
 | 対象 | 理由 |
 |---|---|
 | AeroSpace | ホットキーとウィンドウ配置を奪い合う |
-| `~/.config/aerospace/wallpaper.sh` の呼び出し | 壁紙は comet の `[wallpaper.map]` に移した |
+| `~/.config/aerospace/wallpaper.sh` の呼び出し | 壁紙は comet の `[wallpaper] dir` に移した |
 | Hammerspoon の「修飾キー + BS でウィンドウを閉じる」 | comet の `close-window` と重複する |
 
 Hammerspoon の `app_switcher.lua` / `clipboard.lua` / `search.lua` /

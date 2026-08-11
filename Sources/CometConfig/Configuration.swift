@@ -79,6 +79,9 @@ public struct Configuration: Sendable, Equatable {
     public var hudDuration: TimeInterval = 0.4
     /// ワークスペース番号 → 壁紙のパス。**実在の検証は読み込み側で行う。**
     public var wallpapers: [WorkspaceID: String] = [:]
+    /// 壁紙を入れたディレクトリ。名前順にワークスペースへ割り当てる。
+    /// 個別指定（`wallpapers`）のほうが優先される。
+    public var wallpaperDirectory: String?
     public var bindings: [Binding] = []
     public var windowRules: [WindowRule] = []
     public var problems: [Problem] = []
@@ -241,7 +244,15 @@ public struct Configuration: Sendable, Equatable {
         [wallpaper]
         enabled = true
 
-        # ワークスペース番号 → 画像パス。未設定のワークスペースでは壁紙を変えない。
+        # 壁紙を入れたディレクトリ。**これだけ書けば済む。**
+        # 名前順（Finder と同じ並び）にワークスペース数まで取り、
+        # 足りなければ先頭から繰り返す（3枚なら 1231231231）。
+        #
+        # ディレクトリが無い / 画像が1枚も無いときは壁紙を変えない。
+        # dir = "~/Pictures/wallpapers"
+
+        # ワークスペース番号 → 画像パス。dir より優先する。
+        # 未設定のワークスペースでは壁紙を変えない。
         # 存在しないパスは起動時に警告して捨てる。
         [wallpaper.map]
         # 1 = "~/Pictures/wallpapers/wallpaper1.jpg"

@@ -124,7 +124,7 @@ osascript -e "tell application \"System Events\" to tell every desktop to set pi
 
 `NSWorkspace.setDesktopImageURL(_:for:options:)` をプロセス内で直接呼べば**数ms**で済む。§8.3 参照。
 
-なお現行 `wallpaper_config.sh` は `~/Pictures/wallpapers/wallpaper{1..5}.jpg` を参照するが、**このディレクトリの実在は未確認**。実装時に確認し、無ければ設定側で「未設定のワークスペースは壁紙を変更しない」挙動にする。
+なお現行 `wallpaper_config.sh` は `~/Pictures/wallpapers/wallpaper{1..5}.jpg` を参照するが、**このディレクトリは実在しなかった**（実測）。そのため設定側は「ディレクトリが無い・画像が無いときは壁紙を変更しない」挙動にし、パスを1枚ずつ書かずに `[wallpaper] dir` でディレクトリだけ指定できるようにした（§8.3）。
 
 ### 2.3 移行しないもの
 
@@ -1192,10 +1192,25 @@ final class WallpaperService {
 - `setDesktopImageURL` は内部で非同期に処理されるため、呼び出し自体は即座に返る
 - ワークスペース切替の最初期（ウィンドウ移動の発行前）に呼ぶ
 
-**macOS 26 での検証項目**（§12.5）:
-1. `setDesktopImageURL` が実際に壁紙を変えるか
-2. 変更が「設定 > 壁紙」に反映されるか（されなくても実害はない）
-3. 連続呼び出し（高速なワークスペース切替）でクラッシュ・レートリミットが無いか
+**macOS 26 での検証結果**（§12.5 のフォールバックは不要だった）:
+1. `setDesktopImageURL` は実際に壁紙を変える。**画素で確認済み**（切替直後の撮影で
+   画面の 98% が新しい壁紙 = ワンテンポ遅れていない）
+2. 連続呼び出し（ワークスペース切替の連打）でクラッシュ・レートリミットは無い
+3. **逆に `osascript` 経由（System Events の `picture of current desktop`）は
+   読み出しも書き込みも効かない。** 読みは `missing value`、書きは無反応。
+   動的な壁紙には単一のパスが無いため。検証で壁紙を戻すときも
+   `setDesktopImageURL` を使う必要がある
+
+**割り当ての規則**（`[wallpaper] dir`）:
+
+ワークスペースが10個ある環境で1枚ずつパスを書くのは現実的でないため、
+ディレクトリを1つ指定すれば済むようにする。
+
+- 名前順（Finder と同じ自然順。`2.png` が `10.png` より前）にワークスペース数まで採る
+- 足りなければ先頭から繰り返す（3枚 / 10ワークスペース → 1231231231）
+- 画像以外のファイル（`.DS_Store`、メモ等）と隠しファイルは数に入れない
+- **ディレクトリが無い・画像が1枚も無いときは壁紙を変更しない。**
+  中途半端に変えるより変えないほうが利用者にとって分かりやすい
 
 ---
 
@@ -1245,13 +1260,14 @@ count = 10
 
 [wallpaper]
 enabled = true
-# ワークスペース番号 → 画像パス。未設定のワークスペースでは壁紙を変更しない
+# 画像を入れたディレクトリ。名前順にワークスペース数まで取り、
+# 足りなければ先頭から繰り返す（3枚なら 1231231231）。
+# ディレクトリが無い / 画像が1枚も無いときは壁紙を変更しない
+dir = "~/Pictures/wallpapers"
+# ワークスペース番号 → 画像パス。dir より優先する。
+# 未設定のワークスペースでは壁紙を変更しない
 [wallpaper.map]
 1 = "~/Pictures/wallpapers/wallpaper1.jpg"
-2 = "~/Pictures/wallpapers/wallpaper2.jpg"
-3 = "~/Pictures/wallpapers/wallpaper3.jpg"
-4 = "~/Pictures/wallpapers/wallpaper4.jpg"
-5 = "~/Pictures/wallpapers/wallpaper5.jpg"
 
 [border]
 enabled        = true

@@ -18,10 +18,20 @@ public struct WindowSettleSummary: Equatable, Sendable {
     public let finalRect: IntRect
     /// 観測した異なる位置の数。
     public let distinctPositions: Int
-    /// **落ち着いた先とは違う場所に居た時間の合計。** 症状A の実体はこれ。
+    /// 落ち着いた先とは違う場所に居た時間の合計。
+    ///
+    /// - Important: **アプリの表示アニメーションを含む。** 新しいウィンドウを拡大
+    ///   アニメーションで出すアプリでは、comet が位置を決めたあとも目標へ収束する
+    ///   途中の矩形が観測されるため、この値はちらつきより大きく出る。
     public let msAtOtherPositions: Int
-    /// 最後に落ち着いた先へ到達するまでの時間。
+    /// 最後に落ち着いた先へ到達するまでの時間。こちらもアニメーションを含む。
     public let msToSettle: Int
+    /// **現れた位置から動き出すまでの時間。症状A の実体はこれ。**
+    ///
+    /// 利用者が見る「デフォルト位置に一瞬出る」はこの長さ。動き出したあとの
+    /// 収束はアプリ側のアニメーションで、ウィンドウマネージャには止められない。
+    /// 観測が1点だけなら 0、最後まで動かなければ観測の全区間になる。
+    public let msAtFirstPosition: Int
 
     public var didMove: Bool { distinctPositions > 1 }
 }
@@ -55,6 +65,11 @@ public enum WindowHistory {
             msAtOthers += next - ordered[index].elapsedMs
         }
 
+        // 現れた位置から動き出すまで。許容差の内側の揺れは動きと見なさない。
+        let first = ordered[0].rect
+        let leftAt = ordered.first { !$0.rect.isNear(first, tolerance: tolerance) }?.elapsedMs
+        let msAtFirst = (leftAt ?? ordered[ordered.count - 1].elapsedMs) - start
+
         var representatives: [IntRect] = []
         for sample in ordered
         where !representatives.contains(where: { $0.isNear(sample.rect, tolerance: tolerance) }) {
@@ -66,6 +81,7 @@ public enum WindowHistory {
             finalRect: final,
             distinctPositions: representatives.count,
             msAtOtherPositions: msAtOthers,
-            msToSettle: ordered[settleIndex].elapsedMs - start)
+            msToSettle: ordered[settleIndex].elapsedMs - start,
+            msAtFirstPosition: msAtFirst)
     }
 }

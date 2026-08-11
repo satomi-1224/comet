@@ -283,7 +283,9 @@ let decoration = DecorationController(
     hudDuration: configuration.hudDuration,
     workspaceCount: configuration.workspaceCount,
     log: log)
-decoration.loadWallpapers(configuration.wallpapers)
+decoration.loadWallpapers(
+    configuration.wallpapers, directory: configuration.wallpaperDirectory,
+    workspaceCount: configuration.workspaceCount)
 
 // 内蔵UI は dry-run でも動かす。**他のアプリのウィンドウには一切触らない**ので安全で、
 // 「枠線が目標位置を指す」ことがそのまま配置計算の目視確認になる。
@@ -467,7 +469,9 @@ func reloadConfiguration() {
     decoration.border.style = reloaded.border
     decoration.indicator.style = reloaded.indicator
     decoration.indicator.hudDuration = reloaded.hudDuration
-    decoration.loadWallpapers(reloaded.wallpapers)
+    decoration.loadWallpapers(
+        reloaded.wallpapers, directory: reloaded.wallpaperDirectory,
+        workspaceCount: reloaded.workspaceCount)
 
     // 起動時にしか組み立てられないものは、変わっていたら知らせる。
     // 黙って無視すると「設定したのに効かない」で詰まる。

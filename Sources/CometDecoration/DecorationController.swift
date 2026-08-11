@@ -33,8 +33,15 @@ public final class DecorationController {
     }
 
     /// 壁紙の設定を読み込む。存在しないパスは捨てられる。
-    public func loadWallpapers(_ paths: [WorkspaceID: String]) {
-        wallpaper.load(paths)
+    ///
+    /// - Parameters:
+    ///   - paths: ワークスペースごとの個別指定。
+    ///   - directory: 画像を入れたディレクトリ。名前順に割り当て、足りなければ繰り返す。
+    public func loadWallpapers(
+        _ paths: [WorkspaceID: String], directory: String? = nil, workspaceCount: Int? = nil
+    ) {
+        wallpaper.load(
+            paths, directory: directory, workspaceCount: workspaceCount ?? self.workspaceCount)
     }
 
     /// フォーカス中のウィンドウの矩形（AX 座標）が決まった。

@@ -211,6 +211,9 @@ public enum ConfigLoader {
         }
 
         if let wallpaper = raw.wallpaper, wallpaper.enabled ?? true {
+            if let dir = wallpaper.dir, !dir.trimmingCharacters(in: .whitespaces).isEmpty {
+                configuration.wallpaperDirectory = dir
+            }
             for (key, path) in wallpaper.map ?? [:] {
                 guard let workspace = Int(key), workspace >= 1 else {
                     problems.append(
@@ -439,6 +442,8 @@ private struct RawIndicator: Decodable {
 
 private struct RawWallpaper: Decodable {
     var enabled: Bool?
+    /// 画像を入れたディレクトリ。名前順にワークスペースへ割り当てる。
+    var dir: String?
     /// TOML のキーは文字列なので、番号への変換は読み込み側で行う。
     var map: [String: String]?
 }

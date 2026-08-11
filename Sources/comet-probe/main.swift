@@ -44,6 +44,11 @@ let usage = """
           変わった画素の数。HUD やメニューバーの表示は差分で捉える。
           → differing= total= permille=
 
+    画像を作る:
+      solid <png> <幅x高さ> <#rrggbb>
+          単色の PNG を書き出す。壁紙の切替を色で判定するための検証用。
+          → 書き出したパス
+
     画面とウィンドウを読む:
       screen
           画面の大きさと表示領域（左上原点・pt）。
@@ -58,7 +63,9 @@ let usage = """
           ウィンドウの矩形を追い、落ち着くまでの様子を要約する（症状A の計測）。
           --new を付けると、追跡を始めたあとに現れたウィンドウだけを見る。
           → summary id= appeared-ms= distinct= settle-ms= other-ms=
-                    first-x= … final-h= owner=
+                    first-pos-ms= first-x= … final-h= owner=
+          first-pos-ms が症状A の実体（現れた位置から動き出すまで）。
+          settle-ms と other-ms はアプリの表示アニメーションを含む。
     """
 
 // MARK: - 引数
@@ -283,6 +290,33 @@ case "diff":
     let permille = diff.total > 0 ? diff.count * 1000 / diff.total : 0
     print("differing=\(diff.count) total=\(diff.total) permille=\(permille)")
 
+case "solid":
+    // 壁紙の判定を「その色が出ているか」で行えるようにする。写真では
+    // 拡大や切り抜きの影響を受けるが、単色なら埋め方に関係なく同じ色になる。
+    guard arguments.positionals.count >= 3 else {
+        fail("comet-probe solid <png> <幅x高さ> <#rrggbb>")
+    }
+    let size = arguments.positionals[1].lowercased().split(separator: "x").compactMap { Int($0) }
+    guard size.count == 2, size[0] > 0, size[1] > 0 else { fail("大きさは 幅x高さ の形で指定する") }
+    let fill = requireColor(arguments.positionals[2])
+    guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+        let context = CGContext(
+            data: nil, width: size[0], height: size[1], bitsPerComponent: 8, bytesPerRow: 0,
+            space: space, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+    else { fail("画像を作れない") }
+    context.setFillColor(
+        red: CGFloat(fill.red) / 255, green: CGFloat(fill.green) / 255,
+        blue: CGFloat(fill.blue) / 255, alpha: 1)
+    context.fill(CGRect(x: 0, y: 0, width: size[0], height: size[1]))
+    guard let image = context.makeImage(),
+        let destination = CGImageDestinationCreateWithURL(
+            URL(fileURLWithPath: arguments.positionals[0]) as CFURL, "public.png" as CFString, 1,
+            nil)
+    else { fail("画像を書き出せない") }
+    CGImageDestinationAddImage(destination, image, nil)
+    guard CGImageDestinationFinalize(destination) else { fail("画像を書き出せない") }
+    print(arguments.positionals[0])
+
 case "screen":
     guard let screen = NSScreen.main ?? NSScreen.screens.first else { fail("画面が無い") }
     // AppKit（左下原点）→ CG/AX（左上原点）。comet の内部状態と同じ向きに揃える。
@@ -307,6 +341,13 @@ case "watch":
     let tolerance = arguments.int("tolerance", default: 2)
     let newOnly = arguments.has("new")
     let printSamples = arguments.has("samples")
+
+    // comet のログと突き合わせられるように、開始の壁時計を同じ書式で出す。
+    // 「通知が来るまで」と「適用に掛かる」を切り分けるにはこれが要る。
+    let clock = DateFormatter()
+    clock.dateFormat = "HH:mm:ss.SSS"
+    clock.locale = Locale(identifier: "en_US_POSIX")
+    print("start clock=\(clock.string(from: Date()))")
 
     let start = nowMs()
     // **追跡開始時に居たものの集合は書き換えない。** 現れたウィンドウをここへ
@@ -341,7 +382,8 @@ case "watch":
         print(
             "summary id=\(id) appeared-ms=\(appeared[id] ?? 0) "
                 + "distinct=\(summary.distinctPositions) settle-ms=\(summary.msToSettle) "
-                + "other-ms=\(summary.msAtOtherPositions) samples=\(history.count) "
+                + "other-ms=\(summary.msAtOtherPositions) "
+                + "first-pos-ms=\(summary.msAtFirstPosition) samples=\(history.count) "
                 + "first-x=\(summary.firstRect.x) first-y=\(summary.firstRect.y) "
                 + "first-w=\(summary.firstRect.width) first-h=\(summary.firstRect.height) "
                 + "final-x=\(summary.finalRect.x) final-y=\(summary.finalRect.y) "

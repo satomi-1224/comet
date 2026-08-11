@@ -420,6 +420,37 @@ struct ConfigLoaderTests {
         #expect(configuration.wallpapers.isEmpty)
     }
 
+    /// 1枚ずつ書くのはワークスペースが10個あると現実的でない。
+    /// ディレクトリを1つ指定すれば名前順に割り当てられるようにする。
+    @Test("wallpaper のディレクトリ指定を読める")
+    func parsesWallpaperDirectory() throws {
+        let configuration = try ConfigLoader.parse(
+            """
+            [wallpaper]
+            dir = "~/Pictures/wallpapers"
+            """)
+
+        #expect(configuration.wallpaperDirectory == "~/Pictures/wallpapers")
+    }
+
+    @Test("wallpaper を無効にするとディレクトリも読まない")
+    func disabledWallpaperIgnoresDirectory() throws {
+        let configuration = try ConfigLoader.parse(
+            """
+            [wallpaper]
+            enabled = false
+            dir     = "~/Pictures/wallpapers"
+            """)
+
+        #expect(configuration.wallpaperDirectory == nil)
+    }
+
+    @Test("ディレクトリを書かなければ未指定のまま")
+    func wallpaperDirectoryDefaultsToNil() throws {
+        let configuration = try ConfigLoader.parse("[wallpaper]\nenabled = true")
+        #expect(configuration.wallpaperDirectory == nil)
+    }
+
     @Test("wallpaper のキーがワークスペース番号でなければ問題として記録する")
     func invalidWallpaperKeyIsReported() throws {
         let configuration = try ConfigLoader.parse(

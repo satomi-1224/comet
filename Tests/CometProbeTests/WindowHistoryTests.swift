@@ -81,6 +81,53 @@ struct WindowHistoryTests {
         #expect(summary?.distinctPositions == 2)
     }
 
+    // MARK: - 最初の位置に居た時間（症状A の本体）
+
+    /// **症状A は「最終位置に落ち着くまで」では測れない。**
+    ///
+    /// アプリは新しいウィンドウを拡大アニメーションで出すことがある。comet が位置を
+    /// 決めたあともアニメーションが目標へ収束していく途中の矩形が観測されるので、
+    /// 「落ち着くまで」で測ると**アプリのアニメーションまでちらつきに数えてしまう**
+    /// （実測: TextEdit で 19ms のところを 86ms と報告していた）。
+    ///
+    /// 利用者が見る「デフォルト位置に一瞬出る」の実体は
+    /// **現れた位置から動き出すまでの時間**なので、それを別に出す。
+    @Test("現れた位置から動き出すまでの時間を出す")
+    func timeAtFirstPosition() {
+        let history = samples([
+            (0, defaultPosition), (10, defaultPosition), (20, tiled),
+            (30, IntRect(x: tiled.x + 4, y: tiled.y + 4, width: tiled.width - 8, height: tiled.height - 8)),
+            (80, tiled),
+        ])
+        let summary = WindowHistory.summarize(history, tolerance: 2)
+        // 動き出したのは 20ms の時点。そこから先は目標付近での収束。
+        #expect(summary?.msAtFirstPosition == 20)
+        // 落ち着くまでは 80ms かかっている（アプリのアニメーションを含む）。
+        #expect(summary?.msToSettle == 80)
+    }
+
+    @Test("動かなければ最初の位置に居た時間は観測の全区間")
+    func neverLeftFirstPosition() {
+        let history = samples([(0, tiled), (10, tiled), (50, tiled)])
+        #expect(WindowHistory.summarize(history, tolerance: 0)?.msAtFirstPosition == 50)
+    }
+
+    @Test("観測が1点だけなら最初の位置に居た時間は 0")
+    func singleSample() {
+        #expect(WindowHistory.summarize(samples([(0, tiled)]), tolerance: 0)?.msAtFirstPosition == 0)
+    }
+
+    /// 許容差の内側の揺れで「動いた」と判定してはいけない。
+    /// 出現直後のわずかな伸縮まで拾うと、実際より短い時間を報告してしまう。
+    @Test("許容差の内側の揺れでは動き出したと見なさない")
+    func jitterIsNotMovement() {
+        let nudged = IntRect(
+            x: defaultPosition.x + 2, y: defaultPosition.y + 1,
+            width: defaultPosition.width + 2, height: defaultPosition.height + 2)
+        let history = samples([(0, defaultPosition), (10, nudged), (20, tiled)])
+        #expect(WindowHistory.summarize(history, tolerance: 4)?.msAtFirstPosition == 20)
+    }
+
     @Test("観測の順序が乱れていても時刻で並べ直す")
     func unorderedSamples() {
         let history = samples([(120, tiled), (0, defaultPosition), (60, defaultPosition)])
