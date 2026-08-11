@@ -37,9 +37,12 @@ public final class WallpaperService {
         let fromDirectory =
             directory.map { Self.plan(directory: $0, workspaceCount: workspaceCount) } ?? [:]
         if let directory, !directory.isEmpty, fromDirectory.isEmpty {
-            // **黙って何もしないと設定の綴り間違いに気づけない。**
-            // ただし壁紙は変えない（中途半端に変えるより変えないほうがよい）。
-            log.warn("壁紙のディレクトリに画像が無い（壁紙は変えない）: \(directory)")
+            // **無いだけなら警告しない。** 既定の設定に書いてあるパスなので、
+            // 画像を置いていない利用者には普通の状態。毎回警告すると狼少年になる。
+            // 一方「ディレクトリはあるのに画像が無い」は綴り間違いの可能性がある。
+            let exists = FileManager.default.fileExists(atPath: Self.expand(directory))
+            let message = "壁紙のディレクトリに画像が無いので壁紙は変えない: \(directory)"
+            if exists { log.warn(message) } else { log.debug(message) }
         } else if !fromDirectory.isEmpty {
             log.info(
                 "壁紙のディレクトリから \(Set(fromDirectory.values).count) 枚を "
