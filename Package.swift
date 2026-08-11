@@ -35,6 +35,11 @@ let package = Package(
             ]
         ),
 
+        // 画面の実測。「目視でしか判定できない」と諦めていた項目を機械で判定するための土台。
+        // 撮った画像の画素と、ウィンドウの実座標を読む純粋な計算だけを置く。
+        // 製品コードからは参照しない（アプリバンドルにも入れない）。
+        .target(name: "CometProbe"),
+
         .executableTarget(
             name: "comet",
             dependencies: [
@@ -43,11 +48,22 @@ let package = Package(
             ]
         ),
 
+        // 検証専用の道具。`scripts/verify.sh` から呼ぶ。
+        //
+        // 画面の撮影そのものは `screencapture` に任せる。**画面収録の権限を
+        // comet 側に要求しないため**で、端末が既に持っている権限で撮った PNG を
+        // ここが読むだけにしてある。
+        //
+        // 名前を `cometprobe` にできないのは、macOS のファイルシステムが
+        // 大文字小文字を区別せず `Sources/CometProbe` と同じ場所になるため。
+        .executableTarget(name: "comet-probe", dependencies: ["CometProbe"]),
+
         .testTarget(name: "CometSupportTests", dependencies: ["CometSupport"]),
         .testTarget(name: "CometInputTests", dependencies: ["CometInput"]),
         .testTarget(name: "CometAccessibilityTests", dependencies: ["CometAccessibility"]),
         .testTarget(name: "CometCoreTests", dependencies: ["CometCore"]),
         .testTarget(name: "CometConfigTests", dependencies: ["CometConfig"]),
         .testTarget(name: "CometDecorationTests", dependencies: ["CometDecoration"]),
+        .testTarget(name: "CometProbeTests", dependencies: ["CometProbe"]),
     ]
 )

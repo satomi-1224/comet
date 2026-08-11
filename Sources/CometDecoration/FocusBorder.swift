@@ -30,9 +30,11 @@ public final class FocusBorder {
     private var window: NSWindow?
     /// 今表示している対象の矩形（AX 座標）。
     private var currentFrame: CGRect?
+    private let log: Log
 
-    public init(style: BorderStyle = BorderStyle()) {
+    public init(style: BorderStyle = BorderStyle(), log: Log = .shared) {
         self.style = style
+        self.log = log
     }
 
     /// 対象の矩形（AX 座標）を包む位置へ枠線を出す。
@@ -50,6 +52,11 @@ public final class FocusBorder {
         window.setFrame(
             Geometry.toAppKit(outer, primaryMaxY: MonitorManager.primaryMaxY), display: false)
         window.orderFront(nil)
+        // 撮った画面の画素と突き合わせて検証できるように、実際に置いた位置を残す。
+        // 「枠線が出ない」を追うときの最初の手がかりにもなる。
+        log.trace(
+            "枠線: (\(Int(outer.minX)), \(Int(outer.minY))) "
+                + "\(Int(outer.width))x\(Int(outer.height))")
     }
 
     public func hide() {
@@ -95,7 +102,18 @@ public final class FocusBorder {
 
 extension RGBAColor {
     /// 描画に渡す形へ。`CometCore` を AppKit から切り離しておくための橋渡し。
+    ///
+    /// - Important: **色空間を必ず sRGB で明示する。** `CGColor(red:green:blue:alpha:)`
+    ///   は Generic RGB になり、設定に `#ff00ff` と書いた枠線が画面では
+    ///   `#ff40ff` として描かれる（撮った画面の画素と突き合わせて実測）。
+    ///   設定の綴りと出る色を一致させるために変換を挟まない形で作る。
     public var cgColor: CGColor {
-        CGColor(red: red, green: green, blue: blue, alpha: alpha)
+        let components: [CGFloat] = [red, green, blue, alpha]
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+            let color = CGColor(colorSpace: space, components: components)
+        else {
+            return CGColor(red: red, green: green, blue: blue, alpha: alpha)
+        }
+        return color
     }
 }

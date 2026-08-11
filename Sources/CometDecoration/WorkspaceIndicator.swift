@@ -25,10 +25,14 @@ public final class WorkspaceIndicator {
     private var hudDismissal: DispatchWorkItem?
     private var current: WorkspaceID = 1
     private var total: Int = 10
+    private let log: Log
 
-    public init(style: IndicatorStyle = .both, hudDuration: TimeInterval = 0.4) {
+    public init(
+        style: IndicatorStyle = .both, hudDuration: TimeInterval = 0.4, log: Log = .shared
+    ) {
         self.style = style
         self.hudDuration = hudDuration
+        self.log = log
     }
 
     /// 表示中のワークスペースが変わったことを伝える。
@@ -80,6 +84,19 @@ public final class WorkspaceIndicator {
         // 表示専用。押しても何も起きないのでクリックを受け付けない。
         item.button?.isEnabled = false
         item.button?.toolTip = "comet: ワークスペース \(current)/\(total)"
+
+        // **置かれる場所を決めるのは OS 側**で、ウィンドウ一覧にも出てこない。
+        // 撮った画面のどこを見れば良いか分かるように、横位置と幅を残しておく。
+        //
+        // 縦位置は残さない。status item のウィンドウは AppKit 座標でメニューバーの
+        // 高さぶん上にあり（実測で画面の外を指す y になる）、作った直後は高さも 0 で
+        // 返ってくる。上下の範囲は「メニューバーの高さ」として画面情報から決めるほうが確か。
+        guard let frame = item.button?.window?.frame, frame.width > 0 else {
+            log.debug("メニューバー: ワークスペース \(current)（位置は未確定）")
+            return
+        }
+        log.debug(
+            "メニューバー: ワークスペース \(current) x=\(Int(frame.minX)) 幅=\(Int(frame.width))")
     }
 
     // MARK: - HUD
@@ -95,6 +112,11 @@ public final class WorkspaceIndicator {
         window.alphaValue = 1
         centerHUD(window)
         window.orderFront(nil)
+        let frame = window.frame
+        log.debug(
+            "HUD: ワークスペース \(current) "
+                + "(\(Int(frame.minX)), \(Int(MonitorManager.primaryMaxY - frame.maxY))) "
+                + "\(Int(frame.width))x\(Int(frame.height))")
 
         let dismissal = DispatchWorkItem { [weak self] in
             MainActor.assumeIsolated {

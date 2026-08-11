@@ -39,6 +39,9 @@ Xcode を入れていない場合、SPM は `Testing.framework` を自動では�
 # 実機検証（AeroSpace を止めて実際に動かし、終わったら戻す）
 ./scripts/verify.sh
 
+# 常駐コストの10分放置まで含める
+./scripts/verify.sh --long
+
 # .app を組み立てる（アクセシビリティ権限に必要）
 ./scripts/build-app.sh release
 
@@ -49,6 +52,27 @@ build/comet.app/Contents/MacOS/comet --log-level debug
 open build/comet.app
 log stream --predicate 'subsystem == "local.comet"'
 ```
+
+### 検証の道具（`comet-probe`）
+
+`verify.sh` から呼ぶ検証専用の実行ファイル。**「目視でしか判定できない」項目を
+機械に判定させる**ために、撮った画面の画素とウィンドウの実座標を読む。
+
+```bash
+screencapture -x /tmp/screen.png
+
+# 枠線が目標の矩形に描かれているか（四辺に色が乗っている割合）
+.build/debug/comet-probe edges /tmp/screen.png '#ff00ff' --rect 6,62,1274,1596 --inset 14
+
+# 画面に出ているウィンドウの実座標（アクセシビリティ権限は要らない）
+.build/debug/comet-probe windows
+
+# 新しく現れたウィンドウが落ち着くまでを追う（症状A の計測）
+.build/debug/comet-probe watch --new --ms 4000
+```
+
+撮影そのものは `screencapture` に任せている。**画面収録の権限を comet 側に
+要求しないため**で、端末が既に持っている権限で撮った PNG を読むだけにしてある。
 
 ### コマンド
 

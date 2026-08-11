@@ -1,0 +1,354 @@
+import AppKit
+import CometProbe
+import CoreGraphics
+import Dispatch
+import Foundation
+
+/// 画面の実測を読む検証専用の道具。
+///
+/// これがあるのは、**「目視でしか判定できない」項目を機械に判定させる**ため。
+/// 枠線や HUD が出ているかは撮った画像の画素で、ウィンドウが本当にその位置に
+/// 居るかはウィンドウ一覧で確かめられる。
+///
+/// 撮影そのものは `screencapture` に任せている。画面収録の権限を comet 側に
+/// 要求しないため（端末が既に持っている権限で撮った PNG をここが読む）。
+///
+/// 出力は `key=value` を空白で区切った1行。bash から拾いやすい形にしてある。
+/// 値が空白を含みうる `owner=` は必ず行末に置く。
+
+let usage = """
+    comet-probe — 画面の実測（検証専用）
+
+    使い方: comet-probe <サブコマンド> [オプション]
+
+    画像を読む:
+      size <png>
+          画像の大きさ。撮影の倍率（画素/pt）を求めるのに使う。
+          → w= h=
+
+      color <png> <x,y>
+          その位置の色。
+          → color=#rrggbb
+
+      bbox <png> <#rrggbb> [--tolerance n] [--region x,y,w,h]
+          その色が描かれている範囲。一致した画素すべてを囲むので、
+          位置の判定には edges を使う（画面の別の場所への写り込みを拾う）。
+          → x= y= w= h= count=  （一致が無ければ空で終了コード 1）
+
+      edges <png> <#rrggbb> --rect x,y,w,h [--tolerance n] [--line-width n] [--inset n]
+          その矩形の四辺に色がどれだけ乗っているか（百分率）。枠線の判定用。
+          --inset は角丸の半径より少し大きく取る（円弧は辺の直線上に無い）。
+          → top= bottom= left= right= min=
+
+      diff <a.png> <b.png> [--tolerance n] [--region x,y,w,h]
+          変わった画素の数。HUD やメニューバーの表示は差分で捉える。
+          → differing= total= permille=
+
+    画面とウィンドウを読む:
+      screen
+          画面の大きさと表示領域（左上原点・pt）。
+          → w= h= visible-x= visible-y= visible-w= visible-h=
+
+      windows [--owner name] [--layer n] [--min-area n]
+          画面に出ているウィンドウの実座標。
+          → id= layer= x= y= w= h= owner=
+
+      watch --ms n [--interval-ms n] [--owner name] [--new] [--min-area n]
+            [--tolerance n] [--samples]
+          ウィンドウの矩形を追い、落ち着くまでの様子を要約する（症状A の計測）。
+          --new を付けると、追跡を始めたあとに現れたウィンドウだけを見る。
+          → summary id= appeared-ms= distinct= settle-ms= other-ms=
+                    first-x= … final-h= owner=
+    """
+
+// MARK: - 引数
+
+/// `--name value` と `--name=value` の両方を受ける単純な解釈。
+struct Arguments {
+    private var options: [String: String] = [:]
+    private(set) var positionals: [String] = []
+
+    init(_ raw: [String]) {
+        var index = 0
+        while index < raw.count {
+            let argument = raw[index]
+            guard argument.hasPrefix("--") else {
+                positionals.append(argument)
+                index += 1
+                continue
+            }
+            let name = String(argument.dropFirst(2))
+            if let equals = name.firstIndex(of: "=") {
+                options[String(name[name.startIndex..<equals])] = String(name[name.index(after: equals)...])
+                index += 1
+                continue
+            }
+            let next = index + 1 < raw.count ? raw[index + 1] : nil
+            if let next, !next.hasPrefix("--") {
+                options[name] = next
+                index += 2
+            } else {
+                options[name] = ""  // 値を取らない旗
+                index += 1
+            }
+        }
+    }
+
+    func string(_ name: String) -> String? { options[name] }
+    func has(_ name: String) -> Bool { options[name] != nil }
+    func int(_ name: String, default fallback: Int) -> Int {
+        guard let text = options[name], let value = Int(text) else { return fallback }
+        return value
+    }
+    func rect(_ name: String) -> IntRect? {
+        guard let text = options[name] else { return nil }
+        return IntRect(commaSeparated: text)
+    }
+}
+
+func fail(_ message: String, code: Int32 = 2) -> Never {
+    FileHandle.standardError.write(Data("comet-probe: \(message)\n".utf8))
+    exit(code)
+}
+
+/// 割合を百分率の整数で出す。bash に小数を渡すと比較できない。
+func percent(_ ratio: Double) -> Int { Int((ratio * 100).rounded()) }
+
+// MARK: - 画像
+
+func loadImage(_ path: String) -> PixelImage {
+    guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+        let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil)
+    else {
+        fail("画像を読めない: \(path)")
+    }
+    let width = cgImage.width
+    let height = cgImage.height
+    guard width > 0, height > 0, let space = CGColorSpace(name: CGColorSpace.sRGB) else {
+        fail("画像の大きさが不正: \(path)")
+    }
+
+    // **撮った画像は P3 で保存されている**ことがある。sRGB の文脈へ描き直して
+    // 色空間を揃えてから比べる（設定に書いた #rrggbb は sRGB のつもりの値）。
+    var bytes = [UInt8](repeating: 0, count: width * height * 4)
+    let drawn = bytes.withUnsafeMutableBytes { buffer -> Bool in
+        guard
+            let context = CGContext(
+                data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                bytesPerRow: width * 4, space: space,
+                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+        else { return false }
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return true
+    }
+    guard drawn else { fail("画像を展開できない: \(path)") }
+    return PixelImage(width: width, height: height, bytes: bytes)
+}
+
+func requireColor(_ text: String?) -> PixelColor {
+    guard let text, let color = PixelColor(hex: text) else {
+        fail("色は #rrggbb の形で指定する: \(text ?? "（無し）")")
+    }
+    return color
+}
+
+// MARK: - ウィンドウ
+
+struct WindowInfo {
+    let id: Int
+    let layer: Int
+    let owner: String
+    let alpha: Double
+    let rect: IntRect
+}
+
+/// 画面に出ているウィンドウ。
+///
+/// 位置と大きさは画面収録の権限が無くても読める（題名だけは読めない）。
+/// アクセシビリティ権限にも依存しないので、comet とは独立した観測になる。
+func onScreenWindows() -> [WindowInfo] {
+    let raw =
+        CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+        as? [[String: Any]] ?? []
+    return raw.compactMap { entry in
+        guard let id = entry[kCGWindowNumber as String] as? Int,
+            let bounds = entry[kCGWindowBounds as String] as? [String: CGFloat],
+            let x = bounds["X"], let y = bounds["Y"],
+            let width = bounds["Width"], let height = bounds["Height"]
+        else { return nil }
+        return WindowInfo(
+            id: id,
+            layer: entry[kCGWindowLayer as String] as? Int ?? 0,
+            owner: entry[kCGWindowOwnerName as String] as? String ?? "?",
+            alpha: entry[kCGWindowAlpha as String] as? Double ?? 1,
+            rect: IntRect(
+                x: Int(x.rounded()), y: Int(y.rounded()),
+                width: Int(width.rounded()), height: Int(height.rounded())))
+    }
+}
+
+/// 観測の対象を絞る。
+///
+/// 既定で `layer=0`（通常のウィンドウ）だけを見る。枠線や HUD は別の階層に
+/// 居るので、アプリのウィンドウを数えるときに混ざらないようにする。
+func filtered(_ windows: [WindowInfo], _ arguments: Arguments) -> [WindowInfo] {
+    let owner = arguments.string("owner")
+    let layer = arguments.has("any-layer") ? nil : arguments.int("layer", default: 0)
+    let minimumArea = arguments.int("min-area", default: 0)
+    return windows.filter { window in
+        if let owner, window.owner != owner { return false }
+        if let layer, window.layer != layer { return false }
+        if window.rect.width * window.rect.height < minimumArea { return false }
+        // 透明なウィンドウは見えていない。ちらつきの判定に混ぜてはいけない。
+        return window.alpha > 0
+    }
+}
+
+func nowMs() -> Int { Int(DispatchTime.now().uptimeNanoseconds / 1_000_000) }
+
+// MARK: - 実行
+
+let raw = Array(CommandLine.arguments.dropFirst())
+guard let subcommand = raw.first, !subcommand.hasPrefix("-") else {
+    print(usage)
+    exit(raw.isEmpty ? 2 : 0)
+}
+let arguments = Arguments(Array(raw.dropFirst()))
+
+switch subcommand {
+
+case "help", "--help", "-h":
+    print(usage)
+
+case "size":
+    guard let path = arguments.positionals.first else { fail("画像を指定する") }
+    let image = loadImage(path)
+    print("w=\(image.width) h=\(image.height)")
+
+case "color":
+    guard arguments.positionals.count >= 2 else { fail("comet-probe color <png> <x,y>") }
+    let image = loadImage(arguments.positionals[0])
+    let parts = arguments.positionals[1].split(separator: ",").compactMap { Int($0) }
+    guard parts.count == 2 else { fail("位置は x,y の形で指定する") }
+    guard let color = image.color(x: parts[0], y: parts[1]) else { fail("画像の外を指している") }
+    print("color=\(color)")
+
+case "bbox":
+    guard arguments.positionals.count >= 2 else { fail("comet-probe bbox <png> <#rrggbb>") }
+    let image = loadImage(arguments.positionals[0])
+    let color = requireColor(arguments.positionals[1])
+    guard
+        let match = image.boundingBox(
+            matching: color, tolerance: arguments.int("tolerance", default: 16),
+            in: arguments.rect("region"))
+    else {
+        FileHandle.standardError.write(Data("comet-probe: \(color) の画素が無い\n".utf8))
+        exit(1)
+    }
+    print(
+        "x=\(match.rect.x) y=\(match.rect.y) w=\(match.rect.width) h=\(match.rect.height) "
+            + "count=\(match.count)")
+
+case "edges":
+    guard arguments.positionals.count >= 2 else {
+        fail("comet-probe edges <png> <#rrggbb> --rect x,y,w,h")
+    }
+    let image = loadImage(arguments.positionals[0])
+    let color = requireColor(arguments.positionals[1])
+    guard let rect = arguments.rect("rect") else { fail("--rect x,y,w,h を指定する") }
+    guard
+        let coverage = image.edgeCoverage(
+            of: rect, color: color, tolerance: arguments.int("tolerance", default: 16),
+            lineWidth: arguments.int("line-width", default: 1),
+            inset: arguments.int("inset", default: 0))
+    else {
+        fail("判定できない（矩形 \(rect) が画像 \(image.width)x\(image.height) の外）", code: 3)
+    }
+    print(
+        "top=\(percent(coverage.top)) bottom=\(percent(coverage.bottom)) "
+            + "left=\(percent(coverage.left)) right=\(percent(coverage.right)) "
+            + "min=\(percent(coverage.minimum))")
+
+case "diff":
+    guard arguments.positionals.count >= 2 else { fail("comet-probe diff <a.png> <b.png>") }
+    let before = loadImage(arguments.positionals[0])
+    let after = loadImage(arguments.positionals[1])
+    guard
+        let diff = after.differingPixels(
+            from: before, tolerance: arguments.int("tolerance", default: 12),
+            in: arguments.rect("region"))
+    else {
+        fail("比べられない（大きさが違う、または範囲が画像の外）", code: 3)
+    }
+    let permille = diff.total > 0 ? diff.count * 1000 / diff.total : 0
+    print("differing=\(diff.count) total=\(diff.total) permille=\(permille)")
+
+case "screen":
+    guard let screen = NSScreen.main ?? NSScreen.screens.first else { fail("画面が無い") }
+    // AppKit（左下原点）→ CG/AX（左上原点）。comet の内部状態と同じ向きに揃える。
+    let height = screen.frame.height
+    let visible = screen.visibleFrame
+    let visibleTop = height - (visible.origin.y + visible.height)
+    print(
+        "w=\(Int(screen.frame.width)) h=\(Int(height)) "
+            + "visible-x=\(Int(visible.origin.x)) visible-y=\(Int(visibleTop)) "
+            + "visible-w=\(Int(visible.width)) visible-h=\(Int(visible.height))")
+
+case "windows":
+    for window in filtered(onScreenWindows(), arguments).sorted(by: { $0.rect.x < $1.rect.x }) {
+        print(
+            "id=\(window.id) layer=\(window.layer) x=\(window.rect.x) y=\(window.rect.y) "
+                + "w=\(window.rect.width) h=\(window.rect.height) owner=\(window.owner)")
+    }
+
+case "watch":
+    let duration = arguments.int("ms", default: 1500)
+    let interval = arguments.int("interval-ms", default: 8)
+    let tolerance = arguments.int("tolerance", default: 2)
+    let newOnly = arguments.has("new")
+    let printSamples = arguments.has("samples")
+
+    let start = nowMs()
+    // **追跡開始時に居たものの集合は書き換えない。** 現れたウィンドウをここへ
+    // 足してしまうと、2回目以降の観測が「元から居た」として飛ばされ、
+    // 1点しか記録されない（現れた位置＝落ち着いた位置に見えてしまう）。
+    let initial = Set(filtered(onScreenWindows(), arguments).map(\.id))
+    var samples: [Int: [WindowSample]] = [:]
+    var owners: [Int: String] = [:]
+    var appeared: [Int: Int] = [:]
+
+    while nowMs() - start < duration {
+        let elapsed = nowMs() - start
+        for window in filtered(onScreenWindows(), arguments) {
+            if newOnly, initial.contains(window.id) { continue }
+            if appeared[window.id] == nil {
+                appeared[window.id] = elapsed
+            }
+            owners[window.id] = window.owner
+            samples[window.id, default: []].append(
+                WindowSample(elapsedMs: elapsed, rect: window.rect))
+            if printSamples {
+                print(
+                    "sample id=\(window.id) ms=\(elapsed) x=\(window.rect.x) y=\(window.rect.y) "
+                        + "w=\(window.rect.width) h=\(window.rect.height)")
+            }
+        }
+        usleep(UInt32(max(1, interval) * 1000))
+    }
+
+    for (id, history) in samples.sorted(by: { $0.key < $1.key }) {
+        guard let summary = WindowHistory.summarize(history, tolerance: tolerance) else { continue }
+        print(
+            "summary id=\(id) appeared-ms=\(appeared[id] ?? 0) "
+                + "distinct=\(summary.distinctPositions) settle-ms=\(summary.msToSettle) "
+                + "other-ms=\(summary.msAtOtherPositions) samples=\(history.count) "
+                + "first-x=\(summary.firstRect.x) first-y=\(summary.firstRect.y) "
+                + "first-w=\(summary.firstRect.width) first-h=\(summary.firstRect.height) "
+                + "final-x=\(summary.finalRect.x) final-y=\(summary.finalRect.y) "
+                + "final-w=\(summary.finalRect.width) final-h=\(summary.finalRect.height) "
+                + "owner=\(owners[id] ?? "?")")
+    }
+
+default:
+    fail("未知のサブコマンド: \(subcommand)\n\n\(usage)")
+}

@@ -24,8 +24,9 @@ public final class DecorationController {
         workspaceCount: Int = 10,
         log: Log = .shared
     ) {
-        self.border = FocusBorder(style: border)
-        self.indicator = WorkspaceIndicator(style: indicator, hudDuration: hudDuration)
+        self.border = FocusBorder(style: border, log: log)
+        self.indicator = WorkspaceIndicator(
+            style: indicator, hudDuration: hudDuration, log: log)
         self.wallpaper = WallpaperService(log: log)
         self.workspaceCount = workspaceCount
         self.log = log
