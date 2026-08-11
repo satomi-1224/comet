@@ -272,6 +272,8 @@ engine.defaultOrientation = configuration.defaultOrientation
 engine.windowRules = configuration.windowRules
 engine.focusFollowsActivation = configuration.focusFollowsActivation
 engine.hiddenWindowStrategy = configuration.hiddenWindowStrategy
+engine.focusCycleReset = configuration.focusCycleReset
+engine.focusCycleScope = configuration.focusCycleScope
 
 // MARK: - 内蔵UI
 //
@@ -313,7 +315,9 @@ if engine.isTimingEnabled {
 //
 // **Carbon のホットキーはキー連射では繰り返し発火しない**（実測で 15 回送って 1 回）。
 // `alt-ctrl-l` を押しっぱなしにしてリサイズを追従させるには自分で繰り返すしかない。
-let repeater = HotkeyRepeater()
+let repeater = HotkeyRepeater(
+    delay: configuration.performance.repeatDelay,
+    interval: configuration.performance.repeatInterval)
 hotkeyManager.onRelease = { hotkey in
     repeater.end(hotkey)
 }
@@ -465,6 +469,11 @@ func reloadConfiguration() {
     engine.windowRules = reloaded.windowRules
     engine.focusFollowsActivation = reloaded.focusFollowsActivation
     engine.hiddenWindowStrategy = reloaded.hiddenWindowStrategy
+    engine.focusCycleReset = reloaded.focusCycleReset
+    engine.focusCycleScope = reloaded.focusCycleScope
+    // 繰り返しの間隔は保存しただけで効く（`HotkeyRepeater` は値を見て待つだけ）。
+    repeater.delay = reloaded.performance.repeatDelay
+    repeater.interval = reloaded.performance.repeatInterval
 
     decoration.border.style = reloaded.border
     decoration.indicator.style = reloaded.indicator
@@ -479,7 +488,11 @@ func reloadConfiguration() {
     if reloaded.workspaceCount != engine.workspaceCount {
         needsRestart.append("[workspaces] count")
     }
-    if reloaded.performance != startupPerformance {
+    // 繰り返しの間隔は上で反映済みなので、再起動が要る項目から外して比べる。
+    var comparablePerformance = reloaded.performance
+    comparablePerformance.repeatDelay = startupPerformance.repeatDelay
+    comparablePerformance.repeatInterval = startupPerformance.repeatInterval
+    if comparablePerformance != startupPerformance {
         needsRestart.append("[performance] / [debug] timing")
     }
     if reloaded.startAtLogin != startupStartAtLogin {

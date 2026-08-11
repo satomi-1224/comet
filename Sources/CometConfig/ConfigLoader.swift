@@ -161,7 +161,16 @@ public enum ConfigLoader {
                 } ?? fallback.maxCorrections,
                 disablesEnhancedUserInterface: performance.disableEnhancedUI
                     ?? fallback.disablesEnhancedUserInterface,
-                isTimingEnabled: configuration.performance.isTimingEnabled)
+                isTimingEnabled: configuration.performance.isTimingEnabled,
+                repeatDelay: performance.repeatDelayMS.map {
+                    clamped(
+                        $0 / 1000, to: 0.05...2, label: "[performance] repeat-delay-ms", &problems)
+                } ?? fallback.repeatDelay,
+                repeatInterval: performance.repeatIntervalMS.map {
+                    clamped(
+                        $0 / 1000, to: 0.008...1, label: "[performance] repeat-interval-ms",
+                        &problems)
+                } ?? fallback.repeatInterval)
         }
 
         // `[debug] timing` は `[performance]` の有無に関わらず読む。
@@ -207,6 +216,26 @@ public enum ConfigLoader {
             if let value = indicator.hudDurationMS {
                 configuration.hudDuration = clamped(
                     value / 1000, to: 0.05...5, label: "[indicator] hud-duration-ms", &problems)
+            }
+        }
+
+        if let focus = raw.focus {
+            if let value = focus.cycleResetMS {
+                // 0 は「毎回組み直す」という意味なので下限で切り上げない。
+                configuration.focusCycleReset = clamped(
+                    value / 1000, to: 0...10, label: "[focus] cycle-reset-ms", &problems)
+            }
+            if let value = focus.cycleScope {
+                if let scope = FocusCycleScope(rawValue: value) {
+                    configuration.focusCycleScope = scope
+                } else {
+                    problems.append(
+                        Problem(
+                            kind: .invalidValue,
+                            detail: "[focus] cycle-scope は "
+                                + FocusCycleScope.allCases.map(\.rawValue).joined(separator: " / ")
+                                + " のいずれか: \(value)"))
+                }
             }
         }
 
@@ -405,13 +434,14 @@ private struct RawConfiguration: Decodable {
     var border: RawBorder?
     var indicator: RawIndicator?
     var wallpaper: RawWallpaper?
+    var focus: RawFocus?
     var mode: [String: RawMode]?
     var windowRule: [RawWindowRule]?
 
     enum CodingKeys: String, CodingKey {
         case startAtLogin = "start-at-login"
         case normalization, layout, workspaces, gaps, performance, debug
-        case border, indicator, wallpaper, mode
+        case border, indicator, wallpaper, focus, mode
         case windowRule = "window-rule"
     }
 }
@@ -437,6 +467,16 @@ private struct RawIndicator: Decodable {
     enum CodingKeys: String, CodingKey {
         case style
         case hudDurationMS = "hud-duration-ms"
+    }
+}
+
+private struct RawFocus: Decodable {
+    var cycleResetMS: Double?
+    var cycleScope: String?
+
+    enum CodingKeys: String, CodingKey {
+        case cycleResetMS = "cycle-reset-ms"
+        case cycleScope = "cycle-scope"
     }
 }
 
@@ -501,12 +541,16 @@ private struct RawPerformance: Decodable {
     var axTimeoutMS: Double?
     var applyIntervalMS: Double?
     var maxCorrectionRetries: Int?
+    var repeatDelayMS: Double?
+    var repeatIntervalMS: Double?
     var disableEnhancedUI: Bool?
 
     enum CodingKeys: String, CodingKey {
         case axTimeoutMS = "ax-timeout-ms"
         case applyIntervalMS = "apply-interval-ms"
         case maxCorrectionRetries = "max-correction-retries"
+        case repeatDelayMS = "repeat-delay-ms"
+        case repeatIntervalMS = "repeat-interval-ms"
         case disableEnhancedUI = "disable-enhanced-ui"
     }
 }

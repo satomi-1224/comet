@@ -18,6 +18,12 @@ public struct WindowRecord: Equatable, Sendable {
     /// 所属ワークスペース。**これが唯一の正**で、各ワークスペースのツリーは
     /// ここから ``TreeSync`` で導出される。
     public var workspace: WorkspaceID
+    /// 最後にフォーカスした順番（大きいほど最近）。まだなら 0。
+    ///
+    /// ツリーの葉にも同じ値を持たせているが、あちらはタイル対象だけ。
+    /// アプリ巡回はフローティングやサブディスプレイのウィンドウも対象にするので、
+    /// **台帳側に持つ**必要がある。
+    public var lastFocusedAt: UInt64
 
     public init(
         id: CGWindowID,
@@ -26,7 +32,8 @@ public struct WindowRecord: Equatable, Sendable {
         title: String? = nil,
         bundleID: String? = nil,
         observedFrame: CGRect? = nil,
-        workspace: WorkspaceID = 1
+        workspace: WorkspaceID = 1,
+        lastFocusedAt: UInt64 = 0
     ) {
         self.id = id
         self.pid = pid
@@ -35,6 +42,7 @@ public struct WindowRecord: Equatable, Sendable {
         self.bundleID = bundleID
         self.observedFrame = observedFrame
         self.workspace = workspace
+        self.lastFocusedAt = lastFocusedAt
     }
 }
 

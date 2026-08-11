@@ -53,6 +53,8 @@ public enum WorkspaceTarget: Equatable, Sendable {
 public enum Command: Equatable, Sendable, CustomStringConvertible {
 
     case focus(Direction)
+    /// アプリ巡回・アプリ内のウィンドウ巡回（Hammerspoon の Alt+F / Alt+D 相当）。
+    case focusCycle(FocusCycleTarget)
     case move(Direction)
     case resize(Dimension, delta: CGFloat)
     case joinWith(Direction)
@@ -75,6 +77,7 @@ public enum Command: Equatable, Sendable, CustomStringConvertible {
     public var description: String {
         switch self {
         case .focus(let direction): "focus \(direction.rawValue)"
+        case .focusCycle(let target): "focus \(target.rawValue)"
         case .move(let direction): "move \(direction.rawValue)"
         case .joinWith(let direction): "join-with \(direction.rawValue)"
         case .resize(let dimension, let delta):
@@ -132,6 +135,10 @@ public enum Command: Equatable, Sendable, CustomStringConvertible {
 
         switch name {
         case "focus":
+            // 方向（left/down/up/right）と巡回（next-app 等）の両方を受ける。
+            if arguments.count == 1, let target = FocusCycleTarget(rawValue: arguments[0]) {
+                return .focusCycle(target)
+            }
             return .focus(try parseDirection(name, arguments))
         case "move":
             return .move(try parseDirection(name, arguments))

@@ -397,6 +397,11 @@ color-focused = "$BORDER_COLOR"
 style           = "both"
 hud-duration-ms = 1200
 
+[focus]
+# 検証では 1回の押下ごとに emit-key のプロセス起動（数百ms）が挟まるので、
+# 既定の 1500ms では「押し続けている」と見なされない。長めにしておく。
+cycle-reset-ms = 8000
+
 [debug]
 timing = true
 
@@ -408,6 +413,9 @@ ctrl-alt-shift-2 = "workspace 2"
 ctrl-alt-shift-m = "move-node-to-workspace 2"
 ctrl-alt-shift-3 = "workspace 3"
 ctrl-alt-shift-f = "fullscreen"
+ctrl-alt-shift-a = "focus next-app"
+ctrl-alt-shift-w = "focus next-window-in-app"
+ctrl-alt-shift-h = "focus left"
 TOML
 
 # 撮った画像と comet の座標を突き合わせるための倍率。
@@ -607,6 +615,12 @@ else
     fi
 
     # (b) 目標矩形を線幅ぶん外へ広げた位置にあるか（ギャップの中に線が収まる）。
+    #
+    # **これが「管理対象外のウィンドウに枠線を取られた」を捕まえる判定。**
+    # Chrome の拡張機能のパネルにフォーカスが移り、枠線がそこを囲んでいたときに
+    # ここが落ちた（対応する目標矩形が無い）。ダイアログを出して再現しようとしたが、
+    # シートは comet の走査に現れないことがあり当てにならなかったので、
+    # この不変条件（枠線は必ずタイル対象のウィンドウを指す）で見る。
     FOCUSED_TARGET="$(echo "$BORDER_RECT" | awk -F, -v b="$BORDER_WIDTH" \
       '{print $1+b","$2+b","$3-2*b","$4-2*b}')"
     if grep -qE "目標 +\[[0-9]+\] .*→ \($(echo "$FOCUSED_TARGET" | awk -F, '{print $1", "$2}')\) $(echo "$FOCUSED_TARGET" | awk -F, '{print $3"x"$4}')" "$WORK/7.log"; then
@@ -628,7 +642,11 @@ else
     fi
 
     # (d) focus の移動に追従するか。
-    "$APP" --emit-key ctrl-alt-shift-u >/dev/null 2>&1
+    #
+    # **方向フォーカスは使わない。** 起動直後のフォーカスは実際に前面のウィンドウなので、
+    # それが端にあると `focus right` に行き先が無く「動かない」のが正しい動作になる。
+    # 検証用ウィンドウは同じアプリで複数あるので、アプリ内の巡回なら必ず動く。
+    "$APP" --emit-key ctrl-alt-shift-w >/dev/null 2>&1
     sleep 2
     MOVED_RECT="$(grep -E "枠線:" "$WORK/7.log" | tail -1 | rect_of || true)"
     if [ "$MOVED_RECT" = "$BORDER_RECT" ]; then
@@ -715,6 +733,14 @@ if [ -z "$CREATED_WINDOW_IDS" ]; then
   skip "検証用ウィンドウを開いていないので新規ウィンドウを作れない"
 else
 start_comet "$WORK/9.log" trace
+# **一番大きい区画へフォーカスを寄せてから作る。** dwindle では最後に入った
+# ウィンドウの区画が最小になり、そこを分割すると新規ウィンドウが
+# アプリの最小サイズを下回る。すると降格して「配置されない」のが正しい動作になり、
+# ちらつきの計測にならない（実測で 310x187 が割り当てられて降格した）。
+for _ in 1 2 3 4; do
+  "$APP" --emit-key ctrl-alt-shift-h >/dev/null 2>&1
+done
+sleep 1
 BEFORE_IDS="$(textedit_window_ids)"
 # 許容差を少し大きく取る。出現直後の数 px の伸縮を「動き出した」と数えないため。
 "$PROBE" watch --new --ms 4000 --interval-ms 4 --min-area 120000 --tolerance 8 \
@@ -1038,10 +1064,67 @@ else
   stop_comet
 fi
 
-# ---- 15. 常駐コスト（--long のときだけ） ----------------------------------
+# ---- 15. アプリ・ウィンドウの巡回 ------------------------------------------
+# Hammerspoon の Alt+F / Alt+D を comet へ移したもの（設計書 §12.3）。
+# 「前面のアプリが変わったか」は System Events から独立に読めるので、それで判定する。
+echo "==> 15. アプリとウィンドウを巡回できるか"
+if [ -z "$CREATED_WINDOW_IDS" ]; then
+  skip "検証用ウィンドウが無いので巡回を確かめられない"
+else
+  start_comet "$WORK/15.log" trace
+  # **すでに前面のアプリを activate しても通知は飛ばない。** 別のアプリを挟む。
+  osascript -e 'tell application "Finder" to activate' >/dev/null 2>&1 || true
+  sleep 1
+  osascript -e 'tell application "TextEdit" to activate' >/dev/null 2>&1 || true
+  sleep 1.5
+  FRONT_BEFORE="$(osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null || true)"
+  BORDER_BEFORE="$(grep -E "枠線:" "$WORK/15.log" | tail -1 | rect_of || true)"
+
+  # 同じアプリの次のウィンドウへ。前面のアプリは変わらないはず。
+  "$APP" --emit-key ctrl-alt-shift-w >/dev/null 2>&1
+  sleep 1.5
+  FRONT_AFTER="$(osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null || true)"
+  BORDER_AFTER="$(grep -E "枠線:" "$WORK/15.log" | tail -1 | rect_of || true)"
+  expect_log "$WORK/15.log" "巡回: next-window-in-app" "アプリ内の巡回コマンドが動いた"
+  if [ "$FRONT_BEFORE" = "$FRONT_AFTER" ]; then
+    ok "アプリ内の巡回では前面のアプリが変わらない（${FRONT_AFTER}）"
+  else
+    ng "アプリ内の巡回で別のアプリへ移った（${FRONT_BEFORE} → ${FRONT_AFTER}）"
+  fi
+  if [ -n "$BORDER_AFTER" ] && [ "$BORDER_BEFORE" != "$BORDER_AFTER" ]; then
+    ok "フォーカスが同じアプリの別のウィンドウへ移った"
+  else
+    ng "フォーカスが動かなかった（${BORDER_BEFORE:-なし} → ${BORDER_AFTER:-なし}）"
+  fi
+
+  # 次のアプリへ。前面のアプリが変わるはず。
+  "$APP" --emit-key ctrl-alt-shift-a >/dev/null 2>&1
+  sleep 1.5
+  FRONT_NEXT="$(osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null || true)"
+  expect_log "$WORK/15.log" "巡回: next-app" "アプリ巡回コマンドが動いた"
+  if [ -n "$FRONT_NEXT" ] && [ "$FRONT_NEXT" != "$FRONT_AFTER" ]; then
+    ok "アプリ巡回で別のアプリへ移った（${FRONT_AFTER} → ${FRONT_NEXT}）"
+  else
+    ng "アプリ巡回で前面のアプリが変わらなかった（${FRONT_NEXT:-取得できず}）"
+  fi
+
+  # **続けて押すと並びを組み直さない**ことを見る。組み直すと2つのアプリの間を
+  # 往復するだけになるので、3回押して元のアプリへ戻らなければ良い。
+  "$APP" --emit-key ctrl-alt-shift-a >/dev/null 2>&1
+  sleep 0.5
+  FRONT_THIRD="$(osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null || true)"
+  if [ "$FRONT_THIRD" != "$FRONT_AFTER" ]; then
+    ok "続けて押すと3つ目のアプリへ進む（往復しない）"
+  else
+    ng "続けて押すと元のアプリへ戻った（並びを組み直している）"
+  fi
+  stop_comet
+fi
+
+# ---- 16. 常駐コスト（--long のときだけ） ----------------------------------
 # 10分の放置は普段の実行に入れると長すぎるので、明示したときだけ回す。
 if [ "$LONG" = "1" ]; then
-  echo "==> 15. 常駐コスト（10分の放置）"
+  echo "==> 16. 常駐コスト（10分の放置）"
   start_comet "$WORK/13.log" info
   COMET_PID="$(cat "$WORK/pid")"
   RSS_START="$(ps -o rss= -p "$COMET_PID" | tr -d ' ' || echo 0)"
@@ -1060,7 +1143,7 @@ if [ "$LONG" = "1" ]; then
   expect_le "$(((RSS_END - RSS_START) / 1024))" 20 "10分でメモリが増え続けない(MB)"
   stop_comet
 else
-  echo "==> 15. 常駐コスト（10分）は省略。回すなら ./scripts/verify.sh --long"
+  echo "==> 16. 常駐コスト（10分）は省略。回すなら ./scripts/verify.sh --long"
 fi
 
 # ---- まとめ -------------------------------------------------------------

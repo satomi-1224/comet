@@ -125,6 +125,12 @@ public final class Engine: WindowResolving {
     /// 画面外退避方式では Cmd+Tab や Dock から非表示のウィンドウを選べてしまい、
     /// 「アプリは前面だがウィンドウが見えない」状態になる（設計書 §12.6）。
     public var focusFollowsActivation = true
+    /// アプリ巡回で「続けて押している」とみなす時間。0 なら毎回組み直す。
+    public var focusCycleReset: TimeInterval = 1.5
+    /// 巡回の対象範囲。
+    public var focusCycleScope: FocusCycleScope = .activeWorkspace
+    /// 押し続けている間の巡回の状態。
+    private var focusCycleSession = FocusCycler.Session()
 
     /// フォーカス中のウィンドウの矩形（AX 座標）が決まったときに呼ばれる。
     ///
@@ -398,6 +404,15 @@ public final class Engine: WindowResolving {
                 """)
         }
         relayout()
+
+        // **起動直後のフォーカスを実態に合わせる。**
+        //
+        // これをしないと `focusedWindowID` が nil のままで、方向フォーカスも
+        // アプリ内の巡回も「ツリーの先頭」を起点にしてしまう。利用者が今見ている
+        // ウィンドウと違う場所から動き出すので、最初の1回だけ挙動が読めなくなる。
+        if let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier {
+            refreshFocus(pid: frontmost)
+        }
     }
 
     private var hasFinishedInitialAdoption = false
@@ -579,10 +594,20 @@ public final class Engine: WindowResolving {
     }
 
     private func noteFocused(_ id: CGWindowID) {
-        guard registry[id] != nil else { return }
+        guard let record = registry[id] else { return }
+        // **ダイアログや拡張機能のポップアップへは移さない。** 追うと枠線がそちらへ飛び、
+        // 以降のコマンドの起点も変わる（Chrome の拡張機能パネルで実際に起きた）。
+        // 利用者から見れば「元のウィンドウを操作している」ままにする。
+        guard record.disposition.acceptsFocusTracking else {
+            log.trace("[\(id)] は管理対象外なのでフォーカスを移さない")
+            return
+        }
         focusedWindowID = id
         focusCounter += 1
         root.findWindow(id)?.lastFocusedAt = focusCounter
+        // ツリーの葉はタイル対象しか持たない。アプリ巡回はフローティングや
+        // サブディスプレイのウィンドウも対象にするので台帳側にも記録する。
+        registry.update(id) { $0.lastFocusedAt = self.focusCounter }
         notifyFocusedFrame()
     }
 
@@ -593,6 +618,12 @@ public final class Engine: WindowResolving {
     private func notifyFocusedFrame() {
         guard let handler = onFocusedFrameChanged else { return }
         guard let id = focusedWindowOnActiveWorkspace() else {
+            handler(nil)
+            return
+        }
+        // サブディスプレイのウィンドウには枠線を描かない。あちらは素の macOS のまま
+        // 使えるようにしている場所なので、WM の装飾を持ち込まない。
+        guard registry[id]?.disposition.isOnOtherMonitor != true else {
             handler(nil)
             return
         }
@@ -697,6 +728,65 @@ public final class Engine: WindowResolving {
 
         case .fullscreen:
             toggleFullscreen()
+
+        case .focusCycle(let target):
+            cycleFocus(target)
+        }
+    }
+
+    /// アプリ巡回・アプリ内のウィンドウ巡回。
+    ///
+    /// **押し続けている間は並びを組み直さない**（`FocusCycler.Session`）。
+    /// フォーカスすると最近使った順が変わるので、毎回組み直すと2つのアプリの間を
+    /// 往復するだけになる。
+    private func cycleFocus(_ target: FocusCycleTarget) {
+        let candidates = focusCycleCandidates()
+        guard !candidates.isEmpty else {
+            log.debug("巡回できるウィンドウが無い")
+            return
+        }
+
+        let next: CGWindowID?
+        if target.isAcrossApps {
+            next = focusCycleSession.advance(
+                order: FocusCycler.appOrder(candidates),
+                now: ProcessInfo.processInfo.systemUptime,
+                resetAfter: focusCycleReset, forward: target.isForward)
+        } else {
+            // アプリ内は固定の輪なので、今の位置から進めれば足りる。
+            guard let pid = focusedWindowID.flatMap({ registry[$0]?.pid }) else { return }
+            next = FocusCycler.next(
+                in: FocusCycler.windowsInApp(candidates, pid: pid),
+                from: focusedWindowID, forward: target.isForward)
+        }
+
+        guard let next else {
+            log.debug("巡回の行き先が無い: \(target.rawValue)")
+            return
+        }
+        log.debug("巡回: \(target.rawValue) → [\(next)]")
+        focusWindow(next)
+    }
+
+    /// 巡回の候補。
+    ///
+    /// **画面に出ているものだけ**を対象にする。非表示ワークスペースのウィンドウを
+    /// 含めると、巡回のたびにワークスペースが飛んで収拾がつかない
+    /// （`focus-follows-activation` が働くため）。設定で全体にもできる。
+    private func focusCycleCandidates() -> [FocusCycler.Candidate] {
+        registry.allIDs.compactMap { id in
+            guard let record = registry[id] else { return nil }
+            // ダイアログ等は対象外。サブディスプレイのウィンドウは画面に出ているので含める。
+            guard record.disposition.isTiled || record.disposition.isFloating
+                || record.disposition.isOnOtherMonitor
+            else { return nil }
+            if focusCycleScope == .activeWorkspace, !record.disposition.isOnOtherMonitor,
+                record.workspace != workspaces.activeID
+            {
+                return nil
+            }
+            return FocusCycler.Candidate(
+                id: id, pid: record.pid, lastFocusedAt: record.lastFocusedAt)
         }
     }
 

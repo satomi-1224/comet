@@ -1668,9 +1668,22 @@ let axGetWindow: AXGetWindowFn? = {
 
 現行の `Alt+F`（次のアプリへフォーカス）/ `Alt+D`（同一アプリの次ウィンドウ）は、Hammerspoonが `hs.window.filter` で独自にウィンドウ一覧を保持して動く。WMも同じ情報を持つため二重管理になる。
 
-**当面は共存させる**（実害は小さい）。ただし以下に注意:
-- `Alt+F` でフォーカスが変わると、WM側は `kAXFocusedWindowChangedNotification` でそれを検知して追従する必要がある（§7.5）。**これが正しく動くことをC-3で確認すること**
-- 将来的にはWM側の `focus next-app` / `focus next-window-in-app` として実装し、Hammerspoonから外すのが望ましい
+**comet 側へ移した（実装済み）。** `focus next-app` / `focus prev-app` /
+`focus next-window-in-app` / `focus prev-window-in-app` として実装し、Hammerspoon の
+`modules/app_switcher.lua` は外す（両方動くとキーを奪い合う）。二重管理が無くなった。
+
+実装で押さえた点:
+
+- **押し続けている間は並びを組み直さない。** フォーカスすると最近使った順が変わるため、
+  毎回組み直すと2つのアプリを往復するだけになる。保持する時間は `[focus] cycle-reset-ms`
+  （既定 1500ms。Hammerspoon 版も 1.5 秒だけ並びを保持していた）
+- アプリの代表は**そのアプリで最後に見ていたウィンドウ**。戻ったときに直前の画面が出る
+- **アプリ内の巡回は最近使った順にしない。** それだと2枚の間を往復するだけで
+  3枚目へ行けないので、id の昇順という固定の輪にする
+- 対象は既定で表示中のワークスペースだけ（`[focus] cycle-scope`）。
+  全ワークスペースにすると巡回のたびにワークスペースが飛ぶ
+- 巡回はフローティングとサブディスプレイのウィンドウも対象にするため、
+  最近使った順は**ツリーの葉ではなく台帳（`WindowRecord`）に持つ**
 
 ### 12.4 ウィンドウ操作を拒否するアプリ
 

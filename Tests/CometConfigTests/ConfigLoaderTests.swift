@@ -173,6 +173,58 @@ struct ConfigLoaderTests {
         #expect(configuration.performance.maxCorrections == 5)
     }
 
+    /// Hammerspoon から移した巡回の挙動は、時間も範囲も設定で変えられるようにする。
+    @Test("focus の巡回設定を読める")
+    func parsesFocusCycle() throws {
+        let configuration = try ConfigLoader.parse(
+            """
+            [focus]
+            cycle-reset-ms = 800
+            cycle-scope    = "all"
+            """)
+
+        #expect(configuration.focusCycleReset == 0.8)
+        #expect(configuration.focusCycleScope == .allWorkspaces)
+    }
+
+    @Test("focus の既定は 1.5 秒・表示中のワークスペースだけ")
+    func focusCycleDefaults() {
+        #expect(Configuration().focusCycleReset == 1.5)
+        #expect(Configuration().focusCycleScope == .activeWorkspace)
+    }
+
+    /// 0 は「毎回組み直す」という意味なので、下限で切り上げてはいけない。
+    @Test("巡回のリセット時間は 0 を受ける")
+    func focusCycleResetAcceptsZero() throws {
+        #expect(try ConfigLoader.parse("[focus]\ncycle-reset-ms = 0").focusCycleReset == 0)
+    }
+
+    @Test("巡回の範囲が知らない値なら既定に落として記録する")
+    func invalidFocusCycleScope() throws {
+        let configuration = try ConfigLoader.parse("[focus]\ncycle-scope = \"monitor\"")
+        #expect(configuration.focusCycleScope == .activeWorkspace)
+        #expect(configuration.problems.contains { $0.kind == .invalidValue })
+    }
+
+    @Test("押しっぱなしの繰り返しの間隔を読める")
+    func parsesRepeatTiming() throws {
+        let configuration = try ConfigLoader.parse(
+            """
+            [performance]
+            repeat-delay-ms    = 400
+            repeat-interval-ms = 50
+            """)
+
+        #expect(configuration.performance.repeatDelay == 0.4)
+        #expect(configuration.performance.repeatInterval == 0.05)
+    }
+
+    @Test("繰り返しの既定は 250ms 後に 30ms 間隔")
+    func repeatTimingDefaults() {
+        #expect(PerformanceOptions().repeatDelay == 0.25)
+        #expect(PerformanceOptions().repeatInterval == 0.03)
+    }
+
     @Test("workspaces の個数を読める")
     func parsesWorkspaceCount() throws {
         #expect(try ConfigLoader.parse("[workspaces]\ncount = 4").workspaceCount == 4)

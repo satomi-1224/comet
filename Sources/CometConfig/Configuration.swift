@@ -82,6 +82,10 @@ public struct Configuration: Sendable, Equatable {
     /// 壁紙を入れたディレクトリ。名前順にワークスペースへ割り当てる。
     /// 個別指定（`wallpapers`）のほうが優先される。
     public var wallpaperDirectory: String?
+    /// アプリ巡回で「続けて押している」とみなす時間。0 なら毎回組み直す。
+    public var focusCycleReset: TimeInterval = 1.5
+    /// 巡回の対象範囲。
+    public var focusCycleScope: FocusCycleScope = .activeWorkspace
     public var bindings: [Binding] = []
     public var windowRules: [WindowRule] = []
     public var problems: [Problem] = []
@@ -121,6 +125,16 @@ public struct Configuration: Sendable, Equatable {
         #   "sibling" フォーカス中のウィンドウの隣に並べる（AeroSpace と同じ）
         insertion = "split"
 
+        [focus]
+        # アプリ巡回（focus next-app）で、続けて押したときに同じ並びを使い続ける時間。
+        # これを過ぎると「最近使ったアプリ順」で組み直す。0 にすると毎回組み直す。
+        cycle-reset-ms = 1500
+
+        # 巡回の対象
+        #   "workspace" 表示中のワークスペースのウィンドウだけ
+        #   "all"       全ワークスペース（行き先のワークスペースへ自動で切り替わる）
+        cycle-scope = "workspace"
+
         [workspaces]
         count = 10
 
@@ -150,6 +164,11 @@ public struct Configuration: Sendable, Equatable {
         apply-interval-ms      = 8
         max-correction-retries = 3
 
+        # ホットキーを押しっぱなしにしたときの繰り返し（resize だけが対象）。
+        # Carbon のホットキーはキー連射では繰り返し発火しないので comet 側で繰り返す。
+        repeat-delay-ms        = 250
+        repeat-interval-ms     = 30
+
         # ウィンドウ操作を遅くする AXEnhancedUserInterface を無効化する。
         # VoiceOver を併用するなら false にする。
         disable-enhanced-ui = true
@@ -172,6 +191,12 @@ public struct Configuration: Sendable, Equatable {
         alt-j = "focus down"
         alt-k = "focus up"
         alt-l = "focus right"
+
+        # -- アプリ・ウィンドウの巡回 --
+        # 押し続けている間は並びを組み直さない（[focus] cycle-reset-ms）。
+        # 逆順は prev-app / prev-window-in-app。
+        alt-f = "focus next-app"
+        alt-d = "focus next-window-in-app"
 
         # -- ウィンドウ移動 --
         alt-shift-h = "move left"

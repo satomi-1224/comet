@@ -154,4 +154,26 @@ struct WindowClassifierTests {
         #expect(WindowDisposition.tiled.isTiled)
         #expect(!WindowDisposition.unmanaged(.minimized).isTiled)
     }
+
+    // MARK: - フォーカスを追う対象か
+
+    /// **Chrome の拡張機能のポップアップに枠線が吸われた**ことで見つかった。
+    ///
+    /// タイル対象から外していても台帳には載るため、フォーカス追跡だけがそちらへ移り、
+    /// 枠線がポップアップを囲み、以降のコマンドの起点もそこになっていた。
+    /// 「置き場所を決めているウィンドウ」だけを追う。
+    @Test("管理していないウィンドウへはフォーカスを移さない")
+    func focusTrackingSkipsUnmanagedWindows() {
+        #expect(WindowDisposition.tiled.acceptsFocusTracking)
+        #expect(WindowDisposition.floating.acceptsFocusTracking)
+        // サブディスプレイのウィンドウは実在のアプリのウィンドウなので追う。
+        #expect(WindowDisposition.unmanaged(.otherMonitor).acceptsFocusTracking)
+        // ダイアログ・ポップオーバー・拡張機能のパネルは追わない。
+        #expect(!WindowDisposition.unmanaged(.nonStandardSubrole).acceptsFocusTracking)
+        #expect(!WindowDisposition.unmanaged(.notAWindow).acceptsFocusTracking)
+        #expect(!WindowDisposition.unmanaged(.unknownRole).acceptsFocusTracking)
+        #expect(!WindowDisposition.unmanaged(.tooSmall).acceptsFocusTracking)
+        #expect(!WindowDisposition.unmanaged(.minimized).acceptsFocusTracking)
+        #expect(!WindowDisposition.unmanaged(.fullScreen).acceptsFocusTracking)
+    }
 }

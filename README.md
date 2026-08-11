@@ -100,6 +100,8 @@ screencapture -x /tmp/screen.png
 | `close-window` | ウィンドウを閉じる |
 | `reload-config` | 設定を読み直す |
 | `fullscreen` | フォーカス中のウィンドウを領域いっぱいに広げる／戻す（トグル） |
+| `focus next-app\|prev-app` | 次／前のアプリのウィンドウへ（最近使った順） |
+| `focus next-window-in-app\|prev-window-in-app` | 同じアプリの次／前のウィンドウへ |
 
 `fullscreen` は**macOS のネイティブフルスクリーンではない**。あれは専用の操作スペースを
 作るためワークスペースの実装と衝突する。タイル配置の中で1枚だけ広げ、後ろのウィンドウは
@@ -162,6 +164,21 @@ comet --print-default-config > ~/.config/comet/config.toml
 | `sibling` | フォーカス中のウィンドウの隣に並べる（AeroSpace と同じ） |
 
 `--preview-layout <n>` で、ウィンドウに触れずに枚数ごとの配置を確認できる。
+
+### アプリ・ウィンドウの巡回
+
+既定では `alt-f` が次のアプリ、`alt-d` が同じアプリの次のウィンドウ（Hammerspoon から移植）。
+
+| 設定 | 内容 |
+|---|---|
+| `[focus] cycle-reset-ms` | 続けて押したときに**同じ並びを使い続ける**時間。既定 1500。0 にすると毎回組み直す |
+| `[focus] cycle-scope` | `workspace`（既定・表示中のワークスペースだけ）/ `all`（全ワークスペース。行き先へ自動で切り替わる） |
+
+アプリの並びは**最近使った順**で、各アプリの代表はそのアプリで最後に見ていたウィンドウ。
+`cycle-reset-ms` の間は並びを組み直さないので、押し続けると3つ目・4つ目へ進める
+（毎回組み直すと2つのアプリを往復するだけになる）。
+
+同じアプリ内の巡回は id の昇順の固定の輪なので、3枚以上あっても順に回れる。
 
 ### 見た目
 
@@ -299,6 +316,7 @@ tccutil reset Accessibility local.comet
 | AeroSpace | ホットキーとウィンドウ配置を奪い合う |
 | `~/.config/aerospace/wallpaper.sh` の呼び出し | 壁紙は comet の `[wallpaper] dir` に移した |
 | Hammerspoon の「修飾キー + BS でウィンドウを閉じる」 | comet の `close-window` と重複する |
+| Hammerspoon の `modules/app_switcher.lua`（`alt-f` / `alt-d`） | comet の `focus next-app` / `focus next-window-in-app` に移した。**両方動くとキーを奪い合う**ので `init.lua` の `require("modules.app_switcher")` を外す |
 
 Hammerspoon の `app_switcher.lua` / `clipboard.lua` / `search.lua` /
 `command_launcher*.lua` / `snippets*.lua` はそのまま残してよい。

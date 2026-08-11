@@ -21,17 +21,30 @@ public struct PerformanceOptions: Sendable, Equatable {
     /// 適用のレイテンシをアプリ別に集計するか（設計書 §11.3）。
     public var isTimingEnabled: Bool
 
+    /// ホットキーを押しっぱなしにしてから繰り返しが始まるまで。
+    ///
+    /// **Carbon のホットキーはキー連射では繰り返し発火しない**ので、離されるまで
+    /// comet が自分で繰り返す（`HotkeyRepeater`）。その待ち時間。
+    public var repeatDelay: TimeInterval
+
+    /// 繰り返しの間隔。0.03 ≒ 30Hz。
+    public var repeatInterval: TimeInterval
+
     public init(
         axTimeout: TimeInterval = 0.1,
         applyInterval: TimeInterval = 0.008,
         maxCorrections: Int = 3,
         disablesEnhancedUserInterface: Bool = true,
-        isTimingEnabled: Bool = false
+        isTimingEnabled: Bool = false,
+        repeatDelay: TimeInterval = 0.25,
+        repeatInterval: TimeInterval = 0.03
     ) {
         self.axTimeout = axTimeout
         self.applyInterval = applyInterval
         self.maxCorrections = maxCorrections
         self.disablesEnhancedUserInterface = disablesEnhancedUserInterface
         self.isTimingEnabled = isTimingEnabled
+        self.repeatDelay = repeatDelay
+        self.repeatInterval = repeatInterval
     }
 }

@@ -94,6 +94,15 @@ public enum WindowDisposition: Equatable, Sendable {
     public var isFloating: Bool { self == .floating }
     /// サブディスプレイ上にあるため管理から外している状態か。
     public var isOnOtherMonitor: Bool { self == .unmanaged(.otherMonitor) }
+
+    /// フォーカスの追跡対象にしてよいか。
+    ///
+    /// **ダイアログや拡張機能のポップアップを追ってはいけない。** これらはタイル対象から
+    /// 外れていても台帳には載るため、追うと枠線がポップアップを囲み、以降のコマンドの
+    /// 起点もそこになる（実際に Chrome の拡張機能パネルで起きた）。
+    ///
+    /// サブディスプレイのウィンドウは実在のアプリのウィンドウなので追う。
+    public var acceptsFocusTracking: Bool { isTiled || isFloating || isOnOtherMonitor }
 }
 
 /// どのウィンドウをタイル管理下に置くかの判定。
