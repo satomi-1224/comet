@@ -30,10 +30,19 @@ mkdir -p "$APP/Contents/MacOS"
 cp "$REPO_ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 cp "$BIN_PATH" "$APP/Contents/MacOS/comet"
 
+# アイコン。無ければ既定の白いアイコンになるだけなので致命的ではない。
+# 作り直しは ./scripts/make-icon.sh
+if [ -f "$REPO_ROOT/Resources/AppIcon.icns" ]; then
+  mkdir -p "$APP/Contents/Resources"
+  cp "$REPO_ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+else
+  echo "    アイコンが無い（./scripts/make-icon.sh で作れる）"
+fi
+
 echo "==> 署名"
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "\"$SIGNING_IDENTITY\""; then
   codesign --force --sign "$SIGNING_IDENTITY" --identifier "$BUNDLE_ID" "$APP"
-  echo "    署名 ID: $SIGNING_IDENTITY（権限はビルドをまたいで維持される）"
+  echo "    署名 ID: ${SIGNING_IDENTITY}（権限はビルドをまたいで維持される）"
 else
   codesign --force --sign - --identifier "$BUNDLE_ID" "$APP"
   cat <<'MSG'

@@ -748,6 +748,10 @@ public final class Engine: WindowResolving {
 
         let next: CGWindowID?
         if target.isAcrossApps {
+            // **これは「組み直した場合の並び」で、実際に使う並びとは違う。**
+            // 続きが有効なら押し始めた時点の並びが使われる（そこが肝なので、
+            // この行だけを見て「毎回組み直している」と誤読しないこと）。
+            log.trace("巡回の候補（最近使った順）: \(FocusCycler.appOrder(candidates))")
             next = focusCycleSession.advance(
                 order: FocusCycler.appOrder(candidates),
                 now: ProcessInfo.processInfo.systemUptime,

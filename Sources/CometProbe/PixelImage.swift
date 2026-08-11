@@ -174,6 +174,70 @@ public struct PixelImage: Sendable {
             right: ratio(along: rows, band: rightBand, horizontal: false))
     }
 
+    /// 背景と違う部分の範囲。**アイコンの切り出しに使う。**
+    ///
+    /// 生成した画像には余白と影が付いてくる。アプリのアイコンにするには図形そのものへ
+    /// 切り詰める必要がある。影は背景から数〜十数しか違わないので、**許容差を上げると
+    /// 図形だけが残る**。全部が背景なら `nil`。
+    public func contentBounds(background: PixelColor, tolerance: Int) -> IntRect? {
+        guard isConsistent else { return nil }
+        var minX = Int.max, minY = Int.max, maxX = Int.min, maxY = Int.min
+        for y in 0..<height {
+            for x in 0..<width {
+                guard let pixel = self.color(x: x, y: y),
+                    !pixel.isNear(background, tolerance: tolerance)
+                else { continue }
+                minX = min(minX, x)
+                minY = min(minY, y)
+                maxX = max(maxX, x)
+                maxY = max(maxY, y)
+            }
+        }
+        guard minX <= maxX else { return nil }
+        return IntRect(x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1)
+    }
+
+    /// 背景として落とせる画素（画素番号 = y * width + x の集合）。
+    ///
+    /// **外周から繋がっている部分だけ**を背景とみなす（四隅の色を基準にする）。
+    /// 色だけで判定すると、図形の中の明るい部分（グロウなど）まで抜けて穴が空く。
+    public func backgroundMask(tolerance: Int) -> Set<Int>? {
+        guard isConsistent, let background = color(x: 0, y: 0) else { return nil }
+
+        var mask: Set<Int> = []
+        var queue: [Int] = []
+
+        /// 背景に近ければ塗りつぶしの起点に積む。
+        func seed(_ x: Int, _ y: Int) {
+            guard let pixel = color(x: x, y: y), pixel.isNear(background, tolerance: tolerance)
+            else { return }
+            let index = y * width + x
+            if mask.insert(index).inserted { queue.append(index) }
+        }
+
+        for x in 0..<width {
+            seed(x, 0)
+            seed(x, height - 1)
+        }
+        for y in 0..<height {
+            seed(0, y)
+            seed(width - 1, y)
+        }
+
+        while let index = queue.popLast() {
+            let x = index % width
+            let y = index / width
+            for (nextX, nextY) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
+                guard nextX >= 0, nextY >= 0, nextX < width, nextY < height else { continue }
+                seed(nextX, nextY)
+            }
+        }
+
+        // **全面が背景と判定されたら何も落とさない。** 余白の無い画像（すでに切り出し済みの
+        // アイコン等）にかけたときに、絵が丸ごと消えるのを防ぐ。
+        return mask.count == width * height ? [] : mask
+    }
+
     /// 変わった画素の数。
     ///
     /// 大きさの違う画像や、はみ出した範囲は `nil` を返す。

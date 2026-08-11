@@ -1,7 +1,19 @@
-# comet
+<p align="center">
+  <img src="docs/icon.png" width="128" alt="comet">
+</p>
 
-macOS 向けのタイリングウィンドウマネージャ。AeroSpace + Hammerspoon の2プロセス構成を、
-Swift 製の単一プロセスに置き換えることを目的とする。
+<h1 align="center">comet</h1>
+
+<p align="center">
+  <b>macOS 向けのタイリングウィンドウマネージャ</b><br>
+  AeroSpace + Hammerspoon の2プロセス構成を、Swift 製の単一プロセスに置き換える
+</p>
+
+<p align="center">
+  <sub>
+    単体テスト 549 件 ・ 実機検証 53 項目 ・ 潰すべき4症状はすべて実測で解消
+  </sub>
+</p>
 
 設計の全体像・性能問題の分析・実装フェーズは [DESIGN.md](DESIGN.md) を参照。
 
@@ -86,6 +98,17 @@ screencapture -x /tmp/screen.png
 
 撮影そのものは `screencapture` に任せている。**画面収録の権限を comet 側に
 要求しないため**で、端末が既に持っている権限で撮った PNG を読むだけにしてある。
+
+### アイコンを作り直す
+
+```bash
+./scripts/make-icon.sh ~/Desktop/icon.png    # → Resources/AppIcon.icns
+./scripts/build-app.sh release                # バンドルへ入る
+```
+
+生成画像には余白と影が付いてくるので、**外周から繋がっている背景だけを透明にして**
+正方形へ切り詰める。色だけで一律に抜くと、図形の中の明るい部分（グロウなど）まで
+抜けて穴が空くため。第2引数で背景とみなす色の幅を変えられる（既定 100・影を落とす）。
 
 ### コマンド
 
@@ -334,7 +357,7 @@ tccutil reset Accessibility local.comet
 |---|---|
 | AeroSpace | ホットキーとウィンドウ配置を奪い合う |
 | `~/.config/aerospace/wallpaper.sh` の呼び出し | 壁紙は comet の `[wallpaper] dir` に移した |
-| Hammerspoon の「修飾キー + BS でウィンドウを閉じる」 | comet の `close-window` と重複する |
+| （残す）Hammerspoon の「修飾キー + BS でウィンドウを閉じる」 | comet の既定はこのキーを使わないので競合しない。comet 側で `close-window` を割り当てるなら、そのとき外す |
 | Hammerspoon の `modules/app_switcher.lua`（`alt-f` / `alt-d`） | comet の `focus next-app` / `focus next-window-in-app` に移した。**両方動くとキーを奪い合う**ので `init.lua` の `require("modules.app_switcher")` を外す |
 
 Hammerspoon の `app_switcher.lua` / `clipboard.lua` / `search.lua` /

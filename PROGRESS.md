@@ -1050,6 +1050,41 @@ dir = "~/Pictures/wallpapers"
 - **ディレクトリが無い・画像が1枚も無いときは壁紙を変えない**
 - `[wallpaper.map]` の個別指定は `dir` より優先する
 
+### 常用へ切り替えた（AeroSpace を置き換え）
+
+- `~/.config/comet/config.toml` を配置し `start-at-login = true`。ログイン項目に comet が入った
+- **AeroSpace をログイン項目から外して停止。** アプリ自体は消していないので戻せる
+- comet の既定バインドが AeroSpace の全バインドを網羅していることを機械的に突き合わせた
+  （`alt-shift-6`〜`alt-shift-0` が抜けていたので足した）
+- Hammerspoon の `alt-f` / `alt-d` は実行中のインスタンスから解除した（`hs` の IPC 経由）
+
+**分かったこと: Hammerspoon と AeroSpace の設定は home-manager 管理だった。**
+`~/.hammerspoon/init.lua` と `~/.aerospace.toml` は Nix store へのシンボリックリンクで、
+実体は**別リポジトリ（`dotfiles-global`）**にある。複数マシンで共有しているため、
+宣言的に外すと他のマシンにも影響する。**このマシンだけで済ませるなら、
+ローカルの dotfiles で該当ファイルを上書き宣言してから `home-manager switch` が要る。**
+今回は実行時の解除だけに留めた（Hammerspoon の再読込で戻る）。
+
+| 残っている手作業 | 理由 |
+|---|---|
+| `dotfiles-global` から AeroSpace / `app_switcher` を外す | 共有リポジトリなので他マシンへの影響を判断してから |
+| `./scripts/make-signing-cert.sh` | **ad-hoc 署名は再ビルドごとに署名が変わり、アクセシビリティの確認ダイアログ（`universalAccessAuthWarn`）が出る。** 常用するなら固定の署名 ID を作るべき（キーチェーンのパスワード入力が要るため手動） |
+| `~/Pictures/wallpapers/` に画像を置く | 置くまで壁紙は変わらない |
+
+### アイコンを適用した
+
+デスクトップの生成画像から `Resources/AppIcon.icns` を作り、バンドルへ入れた
+（`./scripts/make-icon.sh`）。
+
+**背景は色で一律に抜いてはいけない。** 図形の中に背景と近い明るい部分（グロウ）があると
+そこまで抜けて穴が空く。**外周から繋がっている部分だけ**を塗りつぶし探索で落とすことで、
+許容差を大きく取って影まで消しても中身は守られる。
+
+**macOS のアイコンキャッシュは頑固だった。** バンドルを作り直し続けたパス
+（`build/comet.app`）では `lsregister -f`・`touch`・版番号の変更・Dock の再起動を試しても
+古い書類アイコンが返る。**別パスへ複製すると正しく表示される**ので、アイコン自体は
+正しく埋め込まれている（`lsregister -kill` は現行 macOS で廃止済み）。
+
 ### 既定のギャップを細くした
 
 アプリ間（`inner`）も画面の縁（`outer`）も 5pt → **3pt** に揃えた。

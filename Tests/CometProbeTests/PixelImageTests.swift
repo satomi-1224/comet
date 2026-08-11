@@ -235,7 +235,7 @@ struct PixelImageTests {
 }
 
 /// テスト用の描画。実際の撮影を挟まずに画素の並びを組み立てる。
-private struct Canvas {
+fileprivate struct Canvas {
 
     let width: Int
     let height: Int
@@ -261,6 +261,13 @@ private struct Canvas {
         bytes[offset + 3] = alpha
     }
 
+    /// 矩形を塗る。
+    mutating func fill(_ rect: IntRect, color: PixelColor) {
+        for y in rect.y..<(rect.y + rect.height) {
+            for x in rect.x..<(rect.x + rect.width) { set(x: x, y: y, to: color) }
+        }
+    }
+
     /// 四隅の正方形を塗り消す。角丸で円弧になり、辺の直線上から外れる部分を模す。
     mutating func erase(corners size: Int, of rect: IntRect, to color: PixelColor) {
         for (originX, originY) in [
@@ -284,5 +291,114 @@ private struct Canvas {
                 if onEdge { set(x: x, y: y, to: color) }
             }
         }
+    }
+}
+
+/// 画像の余白を落とす（アイコンの切り出しに使う）。
+///
+/// 生成画像は周りに余白と影が付いてくる。**アプリのアイコンにするには
+/// 図形そのものの範囲へ切り詰める**必要がある。
+@Suite("余白の検出")
+struct ContentBoundsTests {
+
+    private let white = PixelColor(red: 255, green: 255, blue: 255)
+    private let navy = PixelColor(red: 32, green: 32, blue: 96)
+
+    @Test("背景だけの画像には中身が無い")
+    func nothingButBackground() {
+        let canvas = Canvas(width: 20, height: 20, fill: white)
+        #expect(canvas.image.contentBounds(background: white, tolerance: 8) == nil)
+    }
+
+    @Test("中身の範囲を返す")
+    func findsContent() {
+        var canvas = Canvas(width: 40, height: 30, fill: white)
+        canvas.fill(IntRect(x: 10, y: 8, width: 12, height: 9), color: navy)
+        #expect(
+            canvas.image.contentBounds(background: white, tolerance: 8)
+                == IntRect(x: 10, y: 8, width: 12, height: 9))
+    }
+
+    /// **影を含めてはいけない。** 生成画像の影は背景から数〜十数しか違わないので、
+    /// 許容差を上げれば図形だけが残る。
+    @Test("許容差を上げると薄い影を含めない")
+    func excludesFaintShadow() {
+        var canvas = Canvas(width: 40, height: 30, fill: white)
+        // 図形の周りに薄い影（白から 12 だけ違う）
+        canvas.fill(IntRect(x: 8, y: 6, width: 16, height: 13), color: PixelColor(red: 243, green: 243, blue: 243))
+        canvas.fill(IntRect(x: 10, y: 8, width: 12, height: 9), color: navy)
+
+        #expect(
+            canvas.image.contentBounds(background: white, tolerance: 6)
+                == IntRect(x: 8, y: 6, width: 16, height: 13), "許容差が小さいと影まで含む")
+        #expect(
+            canvas.image.contentBounds(background: white, tolerance: 40)
+                == IntRect(x: 10, y: 8, width: 12, height: 9), "許容差を上げれば図形だけ")
+    }
+
+    // MARK: - 正方形へ
+
+    @Test("正方形へ広げる（中心を保つ）")
+    func expandsToSquare() {
+        let rect = IntRect(x: 10, y: 20, width: 40, height: 20)
+        let square = rect.squared(within: IntRect(x: 0, y: 0, width: 100, height: 100))
+        #expect(square.width == square.height)
+        #expect(square.width == 40)
+        #expect(square.x == 10, "横はそのまま")
+        #expect(square.y == 10, "縦は中心を保って広がる")
+    }
+
+    /// 画像の外へはみ出さない。はみ出すと切り出しが失敗する。
+    @Test("画像の外へはみ出さないよう寄せる")
+    func squareStaysInsideBounds() {
+        let bounds = IntRect(x: 0, y: 0, width: 100, height: 50)
+        let square = IntRect(x: 90, y: 10, width: 8, height: 30).squared(within: bounds)
+        #expect(square.width == square.height)
+        #expect(square.isInside(bounds) || square == bounds)
+    }
+
+    @Test("既に正方形なら変わらない")
+    func alreadySquare() {
+        let rect = IntRect(x: 5, y: 5, width: 20, height: 20)
+        #expect(rect.squared(within: IntRect(x: 0, y: 0, width: 50, height: 50)) == rect)
+    }
+}
+
+/// アイコン用に背景を落とす。
+///
+/// **色で一律に判定してはいけない。** 図形の中に背景と近い色（白いグロウなど）が
+/// あると、そこまで抜けて穴が空く。**外周から繋がっている部分だけ**を背景とみなす。
+@Suite("背景の除去")
+struct BackgroundRemovalTests {
+
+    private let white = PixelColor(red: 250, green: 250, blue: 250)
+    private let navy = PixelColor(red: 32, green: 32, blue: 96)
+
+    @Test("外周から繋がった背景を落とす")
+    func removesOuterBackground() {
+        var canvas = Canvas(width: 10, height: 10, fill: white)
+        canvas.fill(IntRect(x: 3, y: 3, width: 4, height: 4), color: navy)
+        let mask = canvas.image.backgroundMask(tolerance: 20)
+        #expect(mask?.contains(0) == true, "左上は背景")
+        #expect(mask?.contains(3 * 10 + 3) == false, "図形の中は残す")
+    }
+
+    /// 図形の中の明るい部分（グロウ）は背景と近い色でも**外周と繋がっていない**ので残る。
+    @Test("図形の中の明るい部分は落とさない")
+    func keepsEnclosedHighlight() {
+        var canvas = Canvas(width: 12, height: 12, fill: white)
+        canvas.fill(IntRect(x: 2, y: 2, width: 8, height: 8), color: navy)
+        // 図形の中央に背景と同じ色の点（グロウのつもり）
+        canvas.set(x: 6, y: 6, to: white)
+        let mask = canvas.image.backgroundMask(tolerance: 20)
+        #expect(mask?.contains(6 * 12 + 6) == false, "囲まれている明るい点は残す")
+    }
+
+    /// **余白の無い画像に掛けたときに絵を丸ごと消してはいけない。**
+    /// 全面が背景と判定されたら「落とすものが無い」とみなす。
+    @Test("全面が背景と判定されたら何も落とさない")
+    func uniformImageKeepsEverything() {
+        #expect(Canvas(width: 5, height: 5, fill: white).image.backgroundMask(tolerance: 20)?.isEmpty == true)
+        #expect(Canvas(width: 5, height: 5, fill: navy).image.backgroundMask(tolerance: 20)?.isEmpty == true)
     }
 }

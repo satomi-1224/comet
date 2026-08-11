@@ -40,6 +40,19 @@ public struct IntRect: Equatable, Sendable, CustomStringConvertible {
         IntRect(x: x * scale, y: y * scale, width: width * scale, height: height * scale)
     }
 
+    /// 中心を保ったまま正方形へ広げる。**枠からはみ出さないよう寄せる。**
+    ///
+    /// アイコンは正方形でないと歪む。切り出す前にここで揃える。
+    public func squared(within bounds: IntRect) -> IntRect {
+        let side = min(max(width, height), min(bounds.width, bounds.height))
+        var origin = CGPointInt(
+            x: x + (width - side) / 2,
+            y: y + (height - side) / 2)
+        origin.x = min(max(origin.x, bounds.x), bounds.maxX - side)
+        origin.y = min(max(origin.y, bounds.y), bounds.maxY - side)
+        return IntRect(x: origin.x, y: origin.y, width: side, height: side)
+    }
+
     public var description: String { "(\(x), \(y)) \(width)x\(height)" }
 
     /// `x,y,w,h` の並びを読む。コマンドライン引数の形。
@@ -48,4 +61,10 @@ public struct IntRect: Equatable, Sendable, CustomStringConvertible {
         guard parts.count == 4 else { return nil }
         self.init(x: parts[0], y: parts[1], width: parts[2], height: parts[3])
     }
+}
+
+/// 整数の点。`squared(within:)` の中だけで使う。
+struct CGPointInt {
+    var x: Int
+    var y: Int
 }

@@ -44,7 +44,21 @@ let usage = """
           変わった画素の数。HUD やメニューバーの表示は差分で捉える。
           → differing= total= permille=
 
+      trim <png> [--tolerance n] [--square]
+          背景（四隅の色）と違う部分の範囲。アイコンの切り出しに使う。
+          --square で中心を保ったまま正方形へ広げる。
+          → x= y= w= h=
+
     画像を作る:
+      crop <入力png> <出力png> <x,y,w,h> [--size n]
+          切り出して書き出す。--size で正方形に伸縮する（アイコン用）。
+          → 書き出したパス
+
+      icon <入力png> <出力png> [--tolerance n] [--size n]
+          アプリのアイコン用に切り出す。**外周から繋がった背景を透明にし**、
+          残った部分の正方形へ切り詰めて伸縮する（既定 1024）。
+          → 書き出したパス と 切り出した範囲
+
       solid <png> <幅x高さ> <#rrggbb>
           単色の PNG を書き出す。壁紙の切替を色で判定するための検証用。
           → 書き出したパス
@@ -293,6 +307,119 @@ case "diff":
     }
     let permille = diff.total > 0 ? diff.count * 1000 / diff.total : 0
     print("differing=\(diff.count) total=\(diff.total) permille=\(permille)")
+
+case "trim":
+    guard let path = arguments.positionals.first else { fail("comet-probe trim <png>") }
+    let image = loadImage(path)
+    // 背景は四隅の色とみなす。生成画像の余白はほぼ均一なのでこれで足りる。
+    guard let background = image.color(x: 0, y: 0) else { fail("画像を読めない") }
+    guard
+        let content = image.contentBounds(
+            background: background, tolerance: arguments.int("tolerance", default: 24))
+    else {
+        fail("背景しか無い（\(background) 一色）", code: 1)
+    }
+    let result = arguments.has("square") ? content.squared(within: image.bounds) : content
+    print("x=\(result.x) y=\(result.y) w=\(result.width) h=\(result.height)")
+
+case "crop":
+    guard arguments.positionals.count >= 3 else {
+        fail("comet-probe crop <入力png> <出力png> <x,y,w,h>")
+    }
+    guard let rect = IntRect(commaSeparated: arguments.positionals[2]) else {
+        fail("範囲は x,y,w,h の形で指定する")
+    }
+    guard let source = CGImageSourceCreateWithURL(
+        URL(fileURLWithPath: arguments.positionals[0]) as CFURL, nil),
+        let full = CGImageSourceCreateImageAtIndex(source, 0, nil)
+    else { fail("画像を読めない: \(arguments.positionals[0])") }
+    guard let cropped = full.cropping(
+        to: CGRect(x: rect.x, y: rect.y, width: rect.width, height: rect.height))
+    else { fail("切り出せない（範囲が画像の外）") }
+
+    var output = cropped
+    let side = arguments.int("size", default: 0)
+    if side > 0 {
+        guard let space = cropped.colorSpace,
+            let context = CGContext(
+                data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: 0,
+                space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { fail("伸縮できない") }
+        context.interpolationQuality = .high
+        context.draw(cropped, in: CGRect(x: 0, y: 0, width: side, height: side))
+        guard let scaled = context.makeImage() else { fail("伸縮できない") }
+        output = scaled
+    }
+    guard let destination = CGImageDestinationCreateWithURL(
+        URL(fileURLWithPath: arguments.positionals[1]) as CFURL, "public.png" as CFString, 1, nil)
+    else { fail("書き出せない") }
+    CGImageDestinationAddImage(destination, output, nil)
+    guard CGImageDestinationFinalize(destination) else { fail("書き出せない") }
+    print(arguments.positionals[1])
+
+case "icon":
+    guard arguments.positionals.count >= 2 else {
+        fail("comet-probe icon <入力png> <出力png>")
+    }
+    let source = loadImage(arguments.positionals[0])
+    let keyTolerance = arguments.int("tolerance", default: 24)
+    guard let mask = source.backgroundMask(tolerance: keyTolerance) else {
+        fail("画像を読めない: \(arguments.positionals[0])")
+    }
+
+    // 背景を透明にした画素の並びを作る。
+    var bytes = source.bytes
+    for index in mask {
+        let offset = index * 4
+        guard offset + 3 < bytes.count else { continue }
+        bytes[offset + 3] = 0
+    }
+
+    // 残った部分（不透明な画素）の範囲へ切り詰め、正方形に整える。
+    var minX = Int.max, minY = Int.max, maxX = Int.min, maxY = Int.min
+    for y in 0..<source.height {
+        for x in 0..<source.width where !mask.contains(y * source.width + x) {
+            minX = min(minX, x)
+            minY = min(minY, y)
+            maxX = max(maxX, x)
+            maxY = max(maxY, y)
+        }
+    }
+    guard minX <= maxX else { fail("背景しか無い") }
+    let content = IntRect(x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1)
+    let square = content.squared(within: source.bounds)
+
+    // 透明を保てる形式（premultipliedLast）で描き直して書き出す。
+    let side = arguments.int("size", default: 1024)
+    guard let space = CGColorSpace(name: CGColorSpace.sRGB) else { fail("色空間を作れない") }
+    var cutout: CGImage?
+    bytes.withUnsafeMutableBytes { buffer in
+        guard
+            let context = CGContext(
+                data: buffer.baseAddress, width: source.width, height: source.height,
+                bitsPerComponent: 8, bytesPerRow: source.width * 4, space: space,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return }
+        cutout = context.makeImage()
+    }
+    guard
+        let whole = cutout,
+        let cropped = whole.cropping(
+            to: CGRect(x: square.x, y: square.y, width: square.width, height: square.height)),
+        let output = CGContext(
+            data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: 0,
+            space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+    else { fail("切り出せない") }
+    output.interpolationQuality = .high
+    output.draw(cropped, in: CGRect(x: 0, y: 0, width: side, height: side))
+    guard let scaled = output.makeImage(),
+        let destination = CGImageDestinationCreateWithURL(
+            URL(fileURLWithPath: arguments.positionals[1]) as CFURL, "public.png" as CFString, 1,
+            nil)
+    else { fail("書き出せない") }
+    CGImageDestinationAddImage(destination, scaled, nil)
+    guard CGImageDestinationFinalize(destination) else { fail("書き出せない") }
+    print("\(arguments.positionals[1]) 切り出し=\(square) 透明にした画素=\(mask.count)")
 
 case "solid":
     // 壁紙の判定を「その色が出ているか」で行えるようにする。写真では
