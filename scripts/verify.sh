@@ -971,10 +971,77 @@ else
 fi
 stop_comet
 
-# ---- 14. 常駐コスト（--long のときだけ） ----------------------------------
+# ---- 14. サブディスプレイは制御しない -------------------------------------
+# **メインディスプレイだけを制御し、サブディスプレイは素の macOS のまま使えること。**
+# 2台目が繋がっていないと成立しないので、そのときは理由を添えて省略する。
+echo "==> 14. サブディスプレイを制御しないか"
+DISPLAY_COUNT="$("$PROBE" displays | grep -c . || true)"
+if [ "${DISPLAY_COUNT:-1}" -lt 2 ]; then
+  skip "ディスプレイが1台なので確かめられない（2台目を繋いで再実行する）"
+elif [ -z "$CREATED_WINDOW_IDS" ]; then
+  skip "検証用ウィンドウが無いのでサブディスプレイへ移せない"
+else
+  start_comet "$WORK/14.log" trace
+  SUB="$("$PROBE" displays | grep "primary=no" | head -1)"
+  SUB_X="$(field "$SUB" x)"
+  SUB_Y="$(field "$SUB" y)"
+  # サブディスプレイの左上寄りへ置く。AppleScript の bounds は左上原点の
+  # {left, top, right, bottom} なので、AX 座標とそのまま対応する。
+  PUT_X=$((SUB_X + 80))
+  PUT_Y=$((SUB_Y + 80))
+  PUT_W=700
+  PUT_H=500
+  osascript -e "tell application \"TextEdit\" to set bounds of window 1 to {${PUT_X}, ${PUT_Y}, $((PUT_X + PUT_W)), $((PUT_Y + PUT_H))}" \
+    >/dev/null 2>&1 || true
+  sleep 3
+
+  MOVED_OUT="$(grep -oE "\[[0-9]+\] がメインディスプレイの外へ出たので管理から外す" \
+    "$WORK/14.log" | head -1 | grep -oE "[0-9]+" | head -1 || true)"
+  if [ -z "$MOVED_OUT" ]; then
+    ng "サブディスプレイへ移したウィンドウを管理から外さなかった（引き戻している）"
+  else
+    ok "サブディスプレイへ移したら管理から外した"
+    # **置いた場所から動かされていないこと。** ここが本題。
+    LINE="$("$PROBE" windows --any-layer | grep "^id=${MOVED_OUT} " || true)"
+    expect_rect_near \
+      "$(field "$LINE" x),$(field "$LINE" y),$(field "$LINE" w),$(field "$LINE" h)" \
+      "${PUT_X},${PUT_Y},${PUT_W},${PUT_H}" 8 "置いた位置と大きさのまま動かされていない"
+
+    # ワークスペースを切り替えても消えないこと（アプリごと非表示に巻き込まれない）。
+    "$APP" --emit-key ctrl-alt-shift-2 >/dev/null 2>&1
+    sleep 3
+    LINE="$("$PROBE" windows --any-layer | grep "^id=${MOVED_OUT} " || true)"
+    if [ -z "$LINE" ]; then
+      ng "ワークスペース切替でサブディスプレイのウィンドウが消えた"
+    else
+      expect_rect_near \
+        "$(field "$LINE" x),$(field "$LINE" y),$(field "$LINE" w),$(field "$LINE" h)" \
+        "${PUT_X},${PUT_Y},${PUT_W},${PUT_H}" 8 "ワークスペース切替でも動かない・消えない"
+    fi
+
+    # メインへ戻したら再びタイルされること。
+    "$APP" --emit-key ctrl-alt-shift-1 >/dev/null 2>&1
+    sleep 2
+    osascript -e "tell application \"TextEdit\" to set bounds of window 1 to {100, 100, 800, 600}" \
+      >/dev/null 2>&1 || true
+    sleep 3
+    TARGET="$(grep -E "目標 +\[${MOVED_OUT}\]" "$WORK/14.log" | tail -1 | rect_of || true)"
+    if [ -z "$TARGET" ]; then
+      ng "メインへ戻してもタイル対象に戻らなかった"
+    else
+      LINE="$("$PROBE" windows --any-layer | grep "^id=${MOVED_OUT} " || true)"
+      expect_rect_near \
+        "$(field "$LINE" x),$(field "$LINE" y),$(field "$LINE" w),$(field "$LINE" h)" \
+        "$TARGET" 2 "メインへ戻したらタイル配置に戻った"
+    fi
+  fi
+  stop_comet
+fi
+
+# ---- 15. 常駐コスト（--long のときだけ） ----------------------------------
 # 10分の放置は普段の実行に入れると長すぎるので、明示したときだけ回す。
 if [ "$LONG" = "1" ]; then
-  echo "==> 14. 常駐コスト（10分の放置）"
+  echo "==> 15. 常駐コスト（10分の放置）"
   start_comet "$WORK/13.log" info
   COMET_PID="$(cat "$WORK/pid")"
   RSS_START="$(ps -o rss= -p "$COMET_PID" | tr -d ' ' || echo 0)"
@@ -993,7 +1060,7 @@ if [ "$LONG" = "1" ]; then
   expect_le "$(((RSS_END - RSS_START) / 1024))" 20 "10分でメモリが増え続けない(MB)"
   stop_comet
 else
-  echo "==> 14. 常駐コスト（10分）は省略。回すなら ./scripts/verify.sh --long"
+  echo "==> 15. 常駐コスト（10分）は省略。回すなら ./scripts/verify.sh --long"
 fi
 
 # ---- まとめ -------------------------------------------------------------

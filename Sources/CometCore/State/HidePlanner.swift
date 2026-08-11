@@ -30,11 +30,20 @@ public enum HidePlanner {
         public let id: CGWindowID
         public let pid: pid_t
         public let workspace: WorkspaceID
+        /// ワークスペースに関係なく常に画面に出ているか（サブディスプレイ上のウィンドウ）。
+        ///
+        /// **これを持つアプリはアプリごと隠せない。** `NSRunningApplication.hide()` は
+        /// アプリの全ウィンドウを消すので、隠すとサブディスプレイのウィンドウまで消える。
+        /// 隅寄せの対象にもしない（サブディスプレイは触らない方針）。
+        public let isAlwaysVisible: Bool
 
-        public init(id: CGWindowID, pid: pid_t, workspace: WorkspaceID) {
+        public init(
+            id: CGWindowID, pid: pid_t, workspace: WorkspaceID, isAlwaysVisible: Bool = false
+        ) {
             self.id = id
             self.pid = pid
             self.workspace = workspace
+            self.isAlwaysVisible = isAlwaysVisible
         }
     }
 
@@ -73,7 +82,7 @@ public enum HidePlanner {
 
         for pid in order {
             guard let owned = grouped[pid] else { continue }
-            let hiddenHere = owned.filter { $0.workspace != activeWorkspace }
+            let hiddenHere = owned.filter { !$0.isAlwaysVisible && $0.workspace != activeWorkspace }
             let canHideApp =
                 strategy == .hideApp && !hiddenHere.isEmpty && hiddenHere.count == owned.count
 

@@ -54,6 +54,10 @@ let usage = """
           画面の大きさと表示領域（左上原点・pt）。
           → w= h= visible-x= visible-y= visible-w= visible-h=
 
+      displays
+          全ディスプレイの位置と大きさ（左上原点・pt）。1行1台。
+          → id= x= y= w= h= primary=yes|no
+
       windows [--owner name] [--layer n] [--min-area n]
           画面に出ているウィンドウの実座標。
           → id= layer= x= y= w= h= owner=
@@ -327,6 +331,20 @@ case "screen":
         "w=\(Int(screen.frame.width)) h=\(Int(height)) "
             + "visible-x=\(Int(visible.origin.x)) visible-y=\(Int(visibleTop)) "
             + "visible-w=\(Int(visible.width)) visible-h=\(Int(visible.height))")
+
+case "displays":
+    // サブディスプレイの検証は2台目が繋がっていないと成立しない。台数を機械で見る。
+    let height = (NSScreen.main ?? NSScreen.screens.first)?.frame.maxY ?? 0
+    for (index, screen) in NSScreen.screens.enumerated() {
+        // AppKit（左下原点）→ CG/AX（左上原点）。comet の内部と同じ向きに揃える。
+        let frame = screen.frame
+        let top = height - frame.maxY
+        let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+        print(
+            "id=\(number?.uint32Value ?? UInt32(index)) x=\(Int(frame.minX)) y=\(Int(top)) "
+                + "w=\(Int(frame.width)) h=\(Int(frame.height)) "
+                + "primary=\(index == 0 ? "yes" : "no")")
+    }
 
 case "windows":
     for window in filtered(onScreenWindows(), arguments).sorted(by: { $0.rect.x < $1.rect.x }) {

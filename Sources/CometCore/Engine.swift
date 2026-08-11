@@ -438,8 +438,15 @@ public final class Engine: WindowResolving {
     /// ルールを当てるのは**初めて見るウィンドウのときだけ**。あとから当て直すと
     /// `layout floating tiling` で戻した選択を上書きしてしまう。
     private func resolveDisposition(
-        _ classified: WindowDisposition, id: CGWindowID, bundleID: String?, title: String?
+        _ classified: WindowDisposition, id: CGWindowID, bundleID: String?, title: String?,
+        frame: CGRect?
     ) -> WindowDisposition {
+        // **メインディスプレイの外なら何もしない。** タイルもフローティングも
+        // 位置を触る対象なので、その手前で外す（フローティングは切替時に隅寄せされる）。
+        // 判断できないときは従来どおり管理する（`isOutsideMain` を参照）。
+        if let frame, MonitorManager.isOutsideMain(frame, monitors: monitors.monitors) {
+            return .unmanaged(.otherMonitor)
+        }
         guard classified.isTiled else { return classified }
 
         if let known = registry[id]?.disposition {
@@ -467,7 +474,8 @@ public final class Engine: WindowResolving {
                         isFullScreen: window.attributes.isFullScreen,
                         isMinimized: window.attributes.isMinimized,
                         size: window.attributes.size ?? .zero)),
-                id: window.id, bundleID: bundleID, title: window.attributes.title)
+                id: window.id, bundleID: bundleID, title: window.attributes.title,
+                frame: window.attributes.frame)
 
             elements[window.id] = window.element
             idsByElement[window.element] = window.id
@@ -922,6 +930,9 @@ public final class Engine: WindowResolving {
             else { return }
             Task { @MainActor in
                 guard let record = self.registry[id] else { return }
+                let frame = attributes.position.map {
+                    CGRect(origin: $0, size: attributes.size ?? .zero)
+                }
                 let disposition = self.resolveDisposition(
                     WindowClassifier.classify(
                         WindowSnapshot(
@@ -930,7 +941,7 @@ public final class Engine: WindowResolving {
                             isFullScreen: attributes.isFullScreen,
                             isMinimized: attributes.isMinimized,
                             size: attributes.size ?? .zero)),
-                    id: id, bundleID: record.bundleID, title: attributes.title)
+                    id: id, bundleID: record.bundleID, title: attributes.title, frame: frame)
                 self.registry.update(id) { $0.disposition = disposition }
                 self.relayout()
             }
@@ -959,6 +970,14 @@ public final class Engine: WindowResolving {
             log.trace("[\(id)] は退避中なので押し戻す")
             scheduler.reapply(
                 id, TargetFrame(rect: CGRect(origin: origin, size: size), setSize: false))
+            return
+        }
+
+        // サブディスプレイへ出したウィンドウがメインへ戻ってきたかを見る。
+        // 位置が変わったときだけ見れば足りるので、ここで拾う。
+        if record.disposition.isOnOtherMonitor {
+            guard allowExternalReaction(id) else { return }
+            refreshWindow(element, pid: pid)
             return
         }
 
@@ -992,6 +1011,20 @@ public final class Engine: WindowResolving {
     /// - **移動**（領域の外周など、動かせない辺が動いている）
     ///   → レイアウトが唯一の正なので元へ戻す。
     private func reconcileExternalChange(_ id: CGWindowID, observed: CGRect) {
+        // **サブディスプレイへ移されたら手放す。** ここで押し戻すと、利用者が
+        // ドラッグしているのに引き戻される綱引きになる。以後は素の macOS と同じ扱い。
+        if MonitorManager.isOutsideMain(observed, monitors: monitors.monitors) {
+            log.info("[\(id)] がメインディスプレイの外へ出たので管理から外す")
+            registry.update(id) {
+                $0.disposition = .unmanaged(.otherMonitor)
+                $0.observedFrame = observed
+            }
+            desiredFrames.removeValue(forKey: id)
+            scheduler.forget(id)
+            relayout()
+            return
+        }
+
         guard let desired = desiredFrames[id] else { return }
 
         let tolerance: CGFloat = 2
@@ -1427,11 +1460,17 @@ public final class Engine: WindowResolving {
         var hiddenApps: Set<pid_t> = []
 
         for id in registry.allIDs {
-            guard let record = registry[id],
-                record.disposition.isTiled || record.disposition.isFloating
+            guard let record = registry[id] else { continue }
+            // **サブディスプレイのウィンドウも数に入れる。** 数えないと「全ウィンドウが
+            // 隠れているアプリ」と判定され、アプリごと非表示にした拍子に
+            // サブディスプレイのウィンドウまで消える。
+            let onOtherMonitor = record.disposition.isOnOtherMonitor
+            guard record.disposition.isTiled || record.disposition.isFloating || onOtherMonitor
             else { continue }
             windows.append(
-                HidePlanner.Window(id: id, pid: record.pid, workspace: record.workspace))
+                HidePlanner.Window(
+                    id: id, pid: record.pid, workspace: record.workspace,
+                    isAlwaysVisible: onOtherMonitor))
             if NSRunningApplication(processIdentifier: record.pid)?.isHidden == true {
                 hiddenApps.insert(record.pid)
             }

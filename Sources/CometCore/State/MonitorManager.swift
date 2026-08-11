@@ -45,6 +45,25 @@ public final class MonitorManager {
         monitors.first(where: \.isPrimary) ?? monitors.first
     }
 
+    /// その矩形を持っているモニタ。**中心が乗っているモニタ**で決める。
+    ///
+    /// 面積比で決めると、2画面に跨がるウィンドウが境界付近で行き来して落ち着かない。
+    /// どのモニタにも乗っていなければ `nil`（画面の隅へ退避したウィンドウがこれになる）。
+    public nonisolated static func owner(of rect: CGRect, among monitors: [Monitor]) -> Monitor? {
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        return monitors.first { $0.frame.contains(center) }
+    }
+
+    /// メインディスプレイの外（サブディスプレイの上）にあるか。
+    ///
+    /// **判断できないときは `false`。** 「分からない」を「サブにある」と扱うと、
+    /// 非表示ワークスペースのために画面の隅へ追い込んだウィンドウ（中心がどのモニタからも
+    /// 外れる）まで管理対象から外れ、**二度と画面へ戻せなくなる。**
+    public nonisolated static func isOutsideMain(_ rect: CGRect, monitors: [Monitor]) -> Bool {
+        guard monitors.count > 1, let owner = owner(of: rect, among: monitors) else { return false }
+        return !owner.isPrimary
+    }
+
     public func start() {
         refresh()
         NotificationCenter.default.addObserver(

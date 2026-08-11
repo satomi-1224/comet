@@ -51,6 +51,10 @@ public enum UnmanagedReason: String, Equatable, Sendable, CaseIterable, CustomSt
     case fullScreen
     case minimized
     case tooSmall
+    /// メインディスプレイの外（サブディスプレイの上）にある。
+    ///
+    /// **サブディスプレイは素の macOS のまま使えるようにする**ため、位置も大きさも触らない。
+    case otherMonitor
 
     /// 状態の変化で解消しうるか。
     ///
@@ -58,7 +62,8 @@ public enum UnmanagedReason: String, Equatable, Sendable, CaseIterable, CustomSt
     /// 毎回 AX を叩かずに済む。
     public var isTransient: Bool {
         switch self {
-        case .fullScreen, .minimized, .tooSmall: true
+        // サブディスプレイ上は一時的な理由。メインへ戻したら再評価してタイルへ戻す。
+        case .fullScreen, .minimized, .tooSmall, .otherMonitor: true
         case .unknownRole, .notAWindow, .nonStandardSubrole: false
         }
     }
@@ -71,6 +76,7 @@ public enum UnmanagedReason: String, Equatable, Sendable, CaseIterable, CustomSt
         case .fullScreen: "ネイティブフルスクリーン"
         case .minimized: "最小化されている"
         case .tooSmall: "小さすぎる"
+        case .otherMonitor: "メインディスプレイの外（サブディスプレイは制御しない）"
         }
     }
 }
@@ -86,6 +92,8 @@ public enum WindowDisposition: Equatable, Sendable {
 
     public var isTiled: Bool { self == .tiled }
     public var isFloating: Bool { self == .floating }
+    /// サブディスプレイ上にあるため管理から外している状態か。
+    public var isOnOtherMonitor: Bool { self == .unmanaged(.otherMonitor) }
 }
 
 /// どのウィンドウをタイル管理下に置くかの判定。
