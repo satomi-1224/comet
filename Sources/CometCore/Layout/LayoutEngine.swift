@@ -65,12 +65,16 @@ public enum LayoutEngine {
     ///   - scale: `backingScaleFactor`。Retina なら 2。
     ///   - minimums: ウィンドウごとの最小寸法。アプリが指定より小さくならない場合、
     ///     そのぶん兄弟が譲らないとはみ出して重なる。学習した値を渡すと分割位置がそれを避ける。
+    ///   - fullscreen: 領域いっぱいに広げるウィンドウ（`fullscreen` コマンド）。
+    ///     **他のウィンドウの矩形は変えない。** 覆うだけにしておけば、解除したときに
+    ///     元の配置がそのまま出てくる。ツリーに無い id は無視する。
     public static func compute(
         root: ContainerNode,
         area: CGRect,
         gaps: Gaps,
         scale: CGFloat = 2,
-        minimums: [CGWindowID: CGSize] = [:]
+        minimums: [CGWindowID: CGSize] = [:],
+        fullscreen: CGWindowID? = nil
     ) -> Result {
         guard !root.isEmpty else { return .empty }
 
@@ -79,7 +83,12 @@ public enum LayoutEngine {
 
         var worker = Worker(gaps: gaps, scale: scale, minimums: minimums)
         worker.place(root, in: usable)
-        return Result(frames: worker.frames, order: worker.order, boundaries: worker.boundaries)
+
+        var frames = worker.frames
+        if let fullscreen, frames[fullscreen] != nil {
+            frames[fullscreen] = usable
+        }
+        return Result(frames: frames, order: worker.order, boundaries: worker.boundaries)
     }
 
     /// 再帰の途中の状態を持つ。`LayoutEngine` 自体は状態を持たない。

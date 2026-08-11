@@ -686,7 +686,28 @@ public final class Engine: WindowResolving {
                 return
             }
             handler()
+
+        case .fullscreen:
+            toggleFullscreen()
         }
+    }
+
+    /// フォーカス中のウィンドウを領域いっぱいに広げる／戻す。
+    ///
+    /// ツリーは変えない。**覆うだけ**なので、解除すると元の配置がそのまま出てくる。
+    private func toggleFullscreen() {
+        guard let id = focusedWindowOnActiveWorkspace() else { return }
+        let workspace = workspaces.active
+        if workspace.fullscreenWindowID == id {
+            workspace.fullscreenWindowID = nil
+            log.info("[\(id)] の全画面を解除した")
+        } else {
+            workspace.fullscreenWindowID = id
+            log.info("[\(id)] を全画面にした")
+        }
+        // 全画面の切り替えは寸法が変わるので、位置だけの再適用では足りない。
+        workspace.isLayoutDirty = true
+        relayout()
     }
 
     /// フォーカス中のウィンドウを閉じる。
@@ -767,6 +788,9 @@ public final class Engine: WindowResolving {
         // フォーカスは**再配置のあと**に戻す。先に戻すと、まだ退避先にいる
         // ウィンドウをアクティブにしてしまい「アプリは前面だが見えない」状態になる。
         pendingFocusRestore = incoming.id
+        // **ここは `immediately: true` にしない。** 「移動 + 切替」のように1つの
+        // バインドで複数コマンドを撃つとき、まとめて1回の再配置にすることで
+        // 中間状態が画面に出ない（設計書 §9.5）。
         relayout()
     }
 
@@ -1299,9 +1323,17 @@ public final class Engine: WindowResolving {
             return
         }
 
+        // 全画面の対象が閉じた・別のワークスペースへ移った場合は忘れる。
+        // 残しておくと、次に同じ id が振られたウィンドウが勝手に広がる。
+        if let full = workspace.fullscreenWindowID,
+            registry[full]?.workspace != workspace.id || registry[full]?.disposition.isTiled != true
+        {
+            workspace.fullscreenWindowID = nil
+        }
+
         let layout = LayoutEngine.compute(
             root: root, area: monitor.visibleFrame, gaps: gaps, scale: monitor.scale,
-            minimums: minimumSizes)
+            minimums: minimumSizes, fullscreen: workspace.fullscreenWindowID)
         lastLayout = layout
         guard !layout.order.isEmpty else {
             log.warn(

@@ -515,13 +515,14 @@ struct TreeCommandTests {
 
     @Test("未実装のコマンドは未対応として区別できる")
     func parseReportsUnsupportedCommands() {
-        for spec in ["fullscreen", "mode resize", "move-node-to-monitor next"] {
+        // fullscreen は実装済みなのでここには入れない（実装したら必ず外すこと）。
+        for spec in ["mode resize", "move-node-to-monitor next", "focus-monitor next"] {
             let name = String(spec.split(separator: " ")[0])
             #expect(throws: Command.ParseError.unsupported(name: name), "\"\(spec)\"") {
                 try Command.parse(spec)
             }
         }
-        #expect(Command.ParseError.unsupported(name: "fullscreen").description.contains("未対応"))
+        #expect(Command.ParseError.unsupported(name: "mode").description.contains("未対応"))
     }
 
     @Test("layout の引数から向きの候補を取り出せる")

@@ -78,7 +78,16 @@ cleanup() {
   if [ "$AEROSPACE_WAS_RUNNING" = "1" ] && ! pgrep -f AeroSpace >/dev/null; then
     echo "==> AeroSpace を戻す"
     open -a AeroSpace 2>/dev/null
-    sleep 3
+    # **起動を待ち切る。** 固定の sleep では立ち上がる前に抜けることがあり、
+    # 続けて実行したときに「元から止まっていた」と判断されて戻されなくなる。
+    local waited=0
+    while [ "$waited" -lt 15 ] && ! pgrep -f AeroSpace >/dev/null; do
+      sleep 1
+      waited=$((waited + 1))
+    done
+    if ! pgrep -f AeroSpace >/dev/null; then
+      echo "    警告: AeroSpace が戻っていない。手で起動する"
+    fi
   fi
   # **ログの控えは片付けの中で取る。** まとめの直前で取っていると、
   # 途中で異常終了したときに何も残らない（実際にこれで原因を追えなくなった）。
@@ -295,15 +304,31 @@ border_coverage() {
     --inset $(((BORDER_RADIUS + 4) * CAPTURE_SCALE)) --tolerance 24 2>/dev/null
 }
 
-# 画面中央がその色でどれだけ埋まっているか（百分率）。壁紙の判定に使う。
-# 中央を見るのは、上下端のメニューバーや Dock を避けるため。
+# 画面の一部がその色でどれだけ埋まっているか（百分率）。壁紙の判定に使う。
+#
+# **画面中央は見ない。** HUD が中央 120x120 に出るので、200x200 を中央に取ると
+# 最大でも 64% しか埋まらない（実測で 65% と 98% を行き来して原因を見失った）。
+# 上下端（メニューバー・Dock）も避けて、左上から 1/4 の位置を見る。
 desktop_fill() {
   local png="$1" color="$2" region out count area
-  region="$(scale_rect "$((SCREEN_W / 2 - 100)),$((SCREEN_H / 2 - 100)),200,200")"
+  region="$(scale_rect "$((SCREEN_W / 4)),$((SCREEN_H / 4)),200,200")"
   out="$("$PROBE" bbox "$png" "$color" --tolerance 40 --region "$region" 2>/dev/null || true)"
   count="$(field "$out" count)"
   [ -n "$count" ] || count=0
   area=$((200 * CAPTURE_SCALE * 200 * CAPTURE_SCALE))
+  echo $((count * 100 / area))
+}
+
+# 小さな領域を1枚だけ撮って、その色がどれだけ埋まっているかを返す。
+# 全画面の撮影は 120ms〜、100x100 なら ~60ms で済む。連続で撮って時間を測るのに使う。
+spot_fill() {
+  local color="$1" out count area
+  screencapture -x -R "$((SCREEN_W / 4)),$((SCREEN_H / 4)),100,100" "$WORK/spot.png" \
+    2>/dev/null || true
+  out="$("$PROBE" bbox "$WORK/spot.png" "$color" --tolerance 40 2>/dev/null || true)"
+  count="$(field "$out" count)"
+  [ -n "$count" ] || count=0
+  area=$((100 * CAPTURE_SCALE * 100 * CAPTURE_SCALE))
   echo $((count * 100 / area))
 }
 
@@ -382,6 +407,7 @@ ctrl-alt-shift-1 = "workspace 1"
 ctrl-alt-shift-2 = "workspace 2"
 ctrl-alt-shift-m = "move-node-to-workspace 2"
 ctrl-alt-shift-3 = "workspace 3"
+ctrl-alt-shift-f = "fullscreen"
 TOML
 
 # 撮った画像と comet の座標を突き合わせるための倍率。
@@ -830,24 +856,37 @@ else
   capture "$WORK/11-ws2-immediate.png"
   sleep 2
   capture "$WORK/11-ws2.png"
-  expect_ge "$(desktop_fill "$WORK/11-ws2.png" "$WALL_COLOR_2")" 99 \
+  # 99% は厳しすぎる（通知バナー等が中央に重なると落ちる）。壁紙が違えば
+  # 0% 近くになるので、95% でも「どの壁紙が出ているか」の判定は決定的。
+  expect_ge "$(desktop_fill "$WORK/11-ws2.png" "$WALL_COLOR_2")" 95 \
     "ワークスペース2の壁紙が画面に出た"
-  # 遅れていれば「前の壁紙のまま」なので 0% 近くになる。実測 98% は、撮った瞬間に
-  # まだ隠れきっていないウィンドウが数%写り込むぶん（壁紙そのものは変わっている）。
-  #
-  # **この1つの数字が症状D と症状C の両方を示す。** 壁紙が変わっていなければ 0% に、
-  # ウィンドウが残っていれば大きく下がる。撮影は切替要求から ~150ms 後なので、
-  # 90% を超えていれば「切替はその時点で終わっている」と言える。
-  IMMEDIATE="$(desktop_fill "$WORK/11-ws2-immediate.png" "$WALL_COLOR_2")"
-  echo "        切替直後（~150ms 後）の撮影で ${IMMEDIATE}% が新しい壁紙"
-  expect_ge "$IMMEDIATE" 90 "切替と同時に壁紙が変わっている（症状D）"
-  expect_ge "$IMMEDIATE" 90 "切替直後に前のワークスペースのウィンドウが残っていない（症状C）"
+  # 「切替直後に撮る」では測れなかった。**撮影そのものに 60ms〜1秒かかることがあり**、
+  # 何 ms 後の絵なのかが不定だったため（65% と 98% と 0% を行き来して原因を見失った）。
+  # 数え方を変えて、変わるまで撮り続けた回数で測る。1回あたり ~60ms が分解能。
+  WS2_FRAMES=0
+  while [ "$WS2_FRAMES" -lt 16 ]; do
+    if [ "$(spot_fill "$WALL_COLOR_2")" -ge 90 ]; then break; fi
+    WS2_FRAMES=$((WS2_FRAMES + 1))
+  done
+  echo "        ws1→ws2 は撮影 ${WS2_FRAMES} 回（1回 ~60ms）で新しい壁紙になった"
+  # 旧構成（osascript 経由）は 0.2〜1.5 秒かかっていた。8回 ≒ 0.5 秒を超えたら退行。
+  expect_le "$WS2_FRAMES" 8 "ワークスペース切替が速い（症状C・症状D）"
 
   # ワークスペース 3 へ。画像は2枚しか無いので1枚目に戻る。
+  #
+  # **ここが症状D の本命の計測。** ws2 も ws3 も空なので画面にウィンドウが無く、
+  # 撮った絵は壁紙そのもの。ウィンドウの消え方（OS の合成処理）が混ざらない。
   "$APP" --emit-key ctrl-alt-shift-3 >/dev/null 2>&1
+  WS3_FRAMES=0
+  while [ "$WS3_FRAMES" -lt 16 ]; do
+    if [ "$(spot_fill "$WALL_COLOR_1")" -ge 90 ]; then break; fi
+    WS3_FRAMES=$((WS3_FRAMES + 1))
+  done
+  echo "        ws2→ws3（どちらも空）は撮影 ${WS3_FRAMES} 回で壁紙が変わった"
+  expect_le "$WS3_FRAMES" 4 "壁紙だけの切替はさらに速い（症状D）"
   sleep 2
   capture "$WORK/11-ws3.png"
-  expect_ge "$(desktop_fill "$WORK/11-ws3.png" "$WALL_COLOR_1")" 99 \
+  expect_ge "$(desktop_fill "$WORK/11-ws3.png" "$WALL_COLOR_1")" 95 \
     "画像が足りないワークスペースは先頭の画像に戻った（1231… の繰り返し）"
   expect_log "$WORK/11.log" "壁紙を切り替えた: ワークスペース 3 → 1.png" "3つ目に1枚目を割り当てた"
 fi
@@ -901,10 +940,41 @@ else
 fi
 stop_comet
 
-# ---- 13. 常駐コスト（--long のときだけ） ----------------------------------
+# ---- 13. 全画面（fullscreen） ----------------------------------------------
+# 1枚を領域いっぱいに広げるトグル。**macOS のネイティブフルスクリーンではない**
+# （あれは専用の操作スペースを作るのでワークスペースの実装と衝突する）。
+echo "==> 13. 全画面にして戻せるか"
+start_comet "$WORK/13.log" trace
+"$APP" --emit-key ctrl-alt-shift-f >/dev/null 2>&1
+sleep 2
+FULL_ID="$(grep -oE "\[[0-9]+\] を全画面にした" "$WORK/13.log" | head -1 | grep -oE "[0-9]+" \
+  | head -1 || true)"
+if [ -z "$FULL_ID" ]; then
+  ng "全画面のコマンドが効かなかった"
+else
+  # 期待する矩形は「表示領域から外側ギャップを除いた領域」。
+  EXPECTED="$(field "$SCREEN_INFO" visible-x),$(field "$SCREEN_INFO" visible-y),$(field "$SCREEN_INFO" visible-w),$(field "$SCREEN_INFO" visible-h)"
+  EXPECTED="$(echo "$EXPECTED" | awk -F, '{print $1+12","$2+12","$3-24","$4-24}')"
+  LINE="$("$PROBE" windows --any-layer | grep "^id=${FULL_ID} " || true)"
+  expect_rect_near \
+    "$(field "$LINE" x),$(field "$LINE" y),$(field "$LINE" w),$(field "$LINE" h)" \
+    "$EXPECTED" 2 "全画面にしたウィンドウが領域いっぱいになった"
+  # もう一度押すと元の配置へ戻る。ツリーは変えていないので目標矩形も元のまま。
+  "$APP" --emit-key ctrl-alt-shift-f >/dev/null 2>&1
+  sleep 2
+  expect_log "$WORK/13.log" "\[${FULL_ID}\] の全画面を解除した" "もう一度押すと解除された"
+  TARGET="$(grep -E "目標 +\[${FULL_ID}\]" "$WORK/13.log" | tail -1 | rect_of || true)"
+  LINE="$("$PROBE" windows --any-layer | grep "^id=${FULL_ID} " || true)"
+  expect_rect_near \
+    "$(field "$LINE" x),$(field "$LINE" y),$(field "$LINE" w),$(field "$LINE" h)" \
+    "$TARGET" 2 "解除後に元のタイル位置へ戻った"
+fi
+stop_comet
+
+# ---- 14. 常駐コスト（--long のときだけ） ----------------------------------
 # 10分の放置は普段の実行に入れると長すぎるので、明示したときだけ回す。
 if [ "$LONG" = "1" ]; then
-  echo "==> 13. 常駐コスト（10分の放置）"
+  echo "==> 14. 常駐コスト（10分の放置）"
   start_comet "$WORK/13.log" info
   COMET_PID="$(cat "$WORK/pid")"
   RSS_START="$(ps -o rss= -p "$COMET_PID" | tr -d ' ' || echo 0)"
@@ -923,7 +993,7 @@ if [ "$LONG" = "1" ]; then
   expect_le "$(((RSS_END - RSS_START) / 1024))" 20 "10分でメモリが増え続けない(MB)"
   stop_comet
 else
-  echo "==> 13. 常駐コスト（10分）は省略。回すなら ./scripts/verify.sh --long"
+  echo "==> 14. 常駐コスト（10分）は省略。回すなら ./scripts/verify.sh --long"
 fi
 
 # ---- まとめ -------------------------------------------------------------

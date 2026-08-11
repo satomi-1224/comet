@@ -54,9 +54,11 @@ struct ConfigLoaderTests {
         let configuration = try ConfigLoader.parse(Configuration.defaultTOML)
         let unsupported = configuration.problems.filter { $0.kind == .unsupportedCommand }
 
-        #expect(!unsupported.isEmpty, "fullscreen などが含まれるはず")
-        #expect(unsupported.contains { $0.detail.contains("fullscreen") })
-        #expect(!configuration.bindings.contains { $0.spec == "alt-semicolon" }, "登録はされない")
+        #expect(!unsupported.isEmpty, "move-node-to-monitor などが含まれるはず")
+        #expect(unsupported.contains { $0.detail.contains("move-node-to-monitor") })
+        #expect(!configuration.bindings.contains { $0.spec == "alt-s" }, "登録はされない")
+        // 実装済みのものは登録される。
+        #expect(configuration.bindings.contains { $0.spec == "alt-semicolon" }, "fullscreen は実装済み")
     }
 
     @Test("既定の設定はワークスペースのバインドを持つ")

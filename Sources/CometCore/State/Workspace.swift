@@ -28,6 +28,12 @@ public final class Workspace {
     /// 生成直後は「まだ一度も配置していない」ので `true`。
     public var isLayoutDirty = true
 
+    /// 領域いっぱいに広げているウィンドウ（`fullscreen` コマンド）。
+    ///
+    /// **ワークスペースごとに1枚だけ。** 他のウィンドウは後ろに残したままにするので、
+    /// 解除は「この値を捨てて再配置する」だけで済む。
+    public var fullscreenWindowID: CGWindowID?
+
     public init(id: WorkspaceID, orientation: Orientation = .horizontal) {
         self.id = id
         self.root = ContainerNode(orientation: orientation)

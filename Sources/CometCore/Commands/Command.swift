@@ -65,6 +65,11 @@ public enum Command: Equatable, Sendable, CustomStringConvertible {
     case closeWindow
     /// 設定を読み直す。**ツリーの形は保つ。**
     case reloadConfig
+    /// フォーカス中のウィンドウを領域いっぱいに広げる／戻す（トグル）。
+    ///
+    /// macOS のネイティブフルスクリーンではない。あれは専用の操作スペースを作るため
+    /// ワークスペースの実装と衝突する。ここではタイル配置の中で1枚だけ広げる。
+    case fullscreen
 
     /// 設定に書ける綴りへ戻す。ログで「どのコマンドが動いたか」を追えるようにする。
     public var description: String {
@@ -84,6 +89,7 @@ public enum Command: Equatable, Sendable, CustomStringConvertible {
             "move-node-to-workspace \(id)"
         case .closeWindow: "close-window"
         case .reloadConfig: "reload-config"
+        case .fullscreen: "fullscreen"
         }
     }
 
@@ -115,7 +121,7 @@ public enum Command: Equatable, Sendable, CustomStringConvertible {
     ///
     /// 「不明」と分けておかないと、設定の綴り間違いなのか未実装なのかが区別できない。
     private static let plannedCommands: Set<String> = [
-        "move-workspace-to-monitor", "move-node-to-monitor", "fullscreen", "mode",
+        "move-workspace-to-monitor", "move-node-to-monitor", "mode",
         "focus-monitor", "flatten-workspace-tree",
     ]
 
@@ -143,6 +149,8 @@ public enum Command: Equatable, Sendable, CustomStringConvertible {
             return try noArguments(name, arguments, .closeWindow)
         case "reload-config":
             return try noArguments(name, arguments, .reloadConfig)
+        case "fullscreen":
+            return try noArguments(name, arguments, .fullscreen)
         default:
             throw plannedCommands.contains(name)
                 ? ParseError.unsupported(name: name)

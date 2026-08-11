@@ -212,8 +212,10 @@ public struct Configuration: Sendable, Equatable {
         alt-shift-4 = ["move-node-to-workspace 4", "workspace 4"]
         alt-shift-5 = ["move-node-to-workspace 5", "workspace 5"]
 
-        # -- その他（未対応: Phase 4 以降） --
+        # -- 全画面（1枚を領域いっぱいに広げる。トグル） --
         alt-semicolon = "fullscreen"
+
+        # -- その他（未対応: 2台目のモニタが要る） --
         alt-s         = "move-node-to-monitor next"
         alt-a         = "move-node-to-monitor main"
 

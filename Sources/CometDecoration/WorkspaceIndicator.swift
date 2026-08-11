@@ -26,6 +26,15 @@ public final class WorkspaceIndicator {
     private var current: WorkspaceID = 1
     private var total: Int = 10
     private let log: Log
+    /// メニューバーが常に隠れる設定か。**起動時に一度だけ読む。**
+    ///
+    /// 切替のたびに読んではいけない。`UserDefaults` の未キャッシュな読み出しは
+    /// cfprefsd への同期問い合わせになり、**ワークスペース切替の経路に入って
+    /// アプリを隠すのが目に見えて遅れた**（切替直後の画面がまだ前のワークスペースの
+    /// ままになる。画素の検証で捕まえた）。
+    private let menuBarIsAlwaysHidden = UserDefaults.standard.bool(forKey: "_HIHideMenuBar")
+    /// 警告を出したか。毎回出すと煩い。
+    private var warnedAboutHiddenMenuBar = false
 
     public init(
         style: IndicatorStyle = .both, hudDuration: TimeInterval = 0.4, log: Log = .shared
@@ -76,6 +85,15 @@ public final class WorkspaceIndicator {
             }
             statusItem = nil
             return
+        }
+
+        // **メニューバーを自動的に隠す設定では、項目を置いても画面に出ない。**
+        // 「インジケータを on にしたのに何も出ない」で詰まるので一度だけ知らせる。
+        if menuBarIsAlwaysHidden, !warnedAboutHiddenMenuBar {
+            warnedAboutHiddenMenuBar = true
+            log.warn(
+                "メニューバーを自動的に隠す設定のため、ワークスペース番号は常時表示されない。"
+                    + "切替の合図は HUD を使う（[indicator] style = \"hud\"）")
         }
 
         let item = statusItem ?? NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
