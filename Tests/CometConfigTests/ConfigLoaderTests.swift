@@ -77,6 +77,22 @@ struct ConfigLoaderTests {
 
     // MARK: - 各セクション
 
+    /// **枠線はウィンドウの外側へ幅ぶん広がる。** アプリ間のギャップが枠線の幅より
+    /// 狭いと、枠線が隣のウィンドウの中身に重なる。既定同士がぶつからないよう固定する。
+    @Test("既定の枠線は既定のアプリ間ギャップに収まる")
+    func defaultBorderFitsInDefaultGap() {
+        let configuration = Configuration()
+        #expect(configuration.border.width <= configuration.gaps.innerHorizontal)
+        #expect(configuration.border.width <= configuration.gaps.innerVertical)
+    }
+
+    @Test("既定のアプリ間ギャップは画面の縁より狭い")
+    func defaultInnerGapIsThinnerThanOuter() {
+        // アプリ同士は詰めて、画面の縁だけ少し空ける（実際の好みに合わせた既定）。
+        #expect(Configuration().gaps.innerHorizontal == 3)
+        #expect(Configuration().gaps.outerTop == 5)
+    }
+
     @Test("gaps を読める")
     func parsesGaps() throws {
         let configuration = try ConfigLoader.parse(

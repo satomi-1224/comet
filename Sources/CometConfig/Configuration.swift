@@ -61,7 +61,9 @@ public struct Problem: Sendable, Equatable, CustomStringConvertible {
 /// 設定の全体。
 public struct Configuration: Sendable, Equatable {
 
-    public var gaps = Gaps(inner: 5, outer: 5)
+    /// 既定の間隔。**アプリ間（inner）は枠線の幅より広くしておく**
+    /// （枠線はウィンドウの外側へ幅ぶん広がるので、狭いと隣の中身に重なる）。
+    public var gaps = Gaps(inner: 3, outer: 5)
     public var normalization = NormalizationConfig.default
     public var insertionStrategy = TreeSync.InsertionStrategy.split
     public var defaultOrientation = DefaultOrientation.auto
@@ -152,8 +154,11 @@ public struct Configuration: Sendable, Equatable {
         focus-follows-activation = true
 
         [gaps]
-        inner-horizontal = 5
-        inner-vertical   = 5
+        # アプリ間の間隔。**枠線の幅（[border] width）より広くしておく。**
+        # 枠線はウィンドウの外側へ幅ぶん広がるので、狭いと隣の中身に重なる。
+        inner-horizontal = 3
+        inner-vertical   = 3
+        # 画面の縁との間隔
         outer-top        = 5
         outer-bottom     = 5
         outer-left       = 5

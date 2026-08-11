@@ -10,9 +10,13 @@ Swift 製の単一プロセスに置き換えることを目的とする。
 **Phase 6（常用化）まで実装済み。潰すべき4症状はすべて実測で解消を確認した。**
 
 - ウィンドウを開くと自動でタイルされ、閉じると再配置される
-- `focus` / `move` / `resize` / `join-with` / `layout` が動く
+- `focus` / `move` / `resize` / `join-with` / `layout` / `fullscreen` が動く
+- `alt-f` で次のアプリ、`alt-d` で同じアプリの次のウィンドウへ（最近使った順）
 - ワークスペース 10 個。`alt-1`..`alt-0` で切替、`alt-shift-1`..で移動して追従、`alt-tab` で直前へ
-- 設定ファイル（`~/.config/comet/config.toml`）でギャップ・キーバインド・ウィンドウルールを変えられる
+- ワークスペースごとの壁紙。**ディレクトリを1つ指定すれば名前順に割り当てる**
+- **メインディスプレイだけを制御。** サブディスプレイは素の macOS のまま使える
+- 設定ファイル（`~/.config/comet/config.toml`）で間隔・キーバインド・ウィンドウルール・
+  巡回の挙動・繰り返しの速さまで変えられる
 - 寸法を無視するアプリは自動でフローティングへ降格する
 - `[debug] timing = true` + `ctrl-alt-shift-t` でアプリ別の適用レイテンシが出る
 - フォーカス枠線・ワークスペースインジケータ（メニューバー + HUD）・壁紙切替
@@ -179,6 +183,21 @@ comet --print-default-config > ~/.config/comet/config.toml
 （毎回組み直すと2つのアプリを往復するだけになる）。
 
 同じアプリ内の巡回は id の昇順の固定の輪なので、3枚以上あっても順に回れる。
+
+### 速さと間隔
+
+| 設定 | 内容 |
+|---|---|
+| `[gaps] inner-*` | アプリ間の間隔（既定 3）。**`[border] width` より広くすること**（枠線が隣の中身に重なる） |
+| `[gaps] outer-*` | 画面の縁との間隔（既定 5） |
+| `[performance] repeat-delay-ms` | ホットキーを押しっぱなしにしてから繰り返しが始まるまで（既定 250） |
+| `[performance] repeat-interval-ms` | 繰り返しの間隔（既定 30 ≒ 30Hz）。**保存しただけで効く** |
+| `[performance] ax-timeout-ms` | AX の応答待ちの上限（既定 100）。ハングしたアプリを短く見切る |
+| `[performance] apply-interval-ms` | 目標矩形を流す間隔（既定 8 ≒ 120Hz） |
+| `[performance] max-correction-retries` | 目標とずれたときに投げ直す上限（既定 3）。超えるとフローティングへ降格 |
+
+繰り返しの対象は `resize` だけ。`move` や `workspace` が連射されるとウィンドウが
+飛んでいって収拾がつかないため。
 
 ### 見た目
 

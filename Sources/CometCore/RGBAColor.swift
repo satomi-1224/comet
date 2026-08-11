@@ -84,7 +84,10 @@ public struct BorderStyle: Equatable, Sendable {
     /// ウィンドウ矩形に対する枠線ウィンドウの矩形。
     ///
     /// **ウィンドウと同一にすると枠が中身に被る。** 線の幅だけ外へ広げて、
-    /// ギャップの中に枠が描かれるようにする（gaps 5pt なら width 2pt が収まる）。
+    /// ギャップの中に枠が描かれるようにする。
+    ///
+    /// - Important: **`width` はアプリ間のギャップ以下にすること。** 超えると
+    ///   枠線が隣のウィンドウの中身に重なる（既定は gaps 3pt / width 2pt）。
     public func frame(around rect: CGRect) -> CGRect {
         rect.insetBy(dx: -width, dy: -width)
     }
