@@ -81,6 +81,55 @@ mkdir -p ~/.config/comet
 | Stage Manager | オフ | ウィンドウの位置を横取りされる |
 | アクセシビリティ > 視差効果を減らす | オン（推奨） | 切替が速く見える |
 
+### Nix（home-manager）で使う
+
+設定と自動起動を宣言的に持てます。flake を input に足して、home-manager の
+モジュールを読み込みます。
+
+```nix
+{
+  inputs.comet.url = "github:satomi-1224/comet";
+
+  # home-manager の設定
+  imports = [ inputs.comet.homeManagerModules.default ];
+
+  programs.comet = {
+    enable = true;
+    settings = {
+      gaps = { inner-horizontal = 7; inner-vertical = 7; };
+      border.color-focused = "#7aa2f7";
+      wallpaper.dir = "~/Pictures/wallpapers";
+      mode.main.binding = {
+        alt-h = "focus left";
+        alt-l = "focus right";
+        alt-1 = "workspace 1";
+      };
+    };
+  };
+}
+```
+
+| オプション | 既定 | 内容 |
+|---|---|---|
+| `enable` | `false` | 有効にする |
+| `settings` | `{}` | `config.toml` の内容（TOML へ変換して置く） |
+| `settingsFile` | `null` | 書いてある `config.toml` をそのまま置く。`settings` より優先 |
+| `app` | `~/Applications/comet.app` | 本体の場所 |
+| `startService` | `true` | launchd agent として登録し、ログイン時に起動する |
+| `logFile` | `~/Library/Logs/comet.log` | launchd から起動したときのログ |
+
+**キーバインドは置き換えです**（既定へ追加されるのではありません）。書くなら必要なものを
+全部書いてください。設定は保存を検知して自動で読み直すので、switch すればそのまま反映されます。
+
+> [!IMPORTANT]
+> **本体は Nix ストアに置きません。** 理由は2つあります。
+> 1. comet は Swift 6 を要求しますが、nixpkgs の Swift は 5.10 でストアの中では組めません
+> 2. アクセシビリティ権限はアプリの同一性に紐づくため、更新のたびにパスが変わる
+>    ストアへ置くと権限が毎回外れます
+>
+> 本体は `./scripts/install-app.sh` が `~/Applications/comet.app` へ入れます。
+> モジュールが受け持つのは**設定・自動起動・ログの置き場所**です。
+
 ### ログイン時に起動する
 
 設定に `start-at-login = true` を書くか、launchd へ登録します。
