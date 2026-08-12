@@ -526,17 +526,27 @@ if configWatcher.start() {
 
 // MARK: - ログイン起動
 
-if configuration.startAtLogin {
-    if Bundle.main.bundleIdentifier != nil {
-        do {
-            try SMAppService.mainApp.register()
-            log.info("ログイン起動を有効にした")
-        } catch {
-            log.warn("ログイン起動を有効にできなかった: \(error)")
-        }
-    } else {
-        // 素の実行ファイルには登録できない。build-app.sh で .app にしてから使う。
+if Bundle.main.bundleIdentifier == nil {
+    // 素の実行ファイルには登録できない。build-app.sh で .app にしてから使う。
+    if configuration.startAtLogin {
         log.warn("start-at-login はアプリバンドルでのみ有効（./scripts/build-app.sh を使う）")
+    }
+} else if configuration.startAtLogin {
+    do {
+        try SMAppService.mainApp.register()
+        log.info("ログイン起動を有効にした")
+    } catch {
+        log.warn("ログイン起動を有効にできなかった: \(error)")
+    }
+} else if SMAppService.mainApp.status == .enabled {
+    // **切ったら登録を外す。** 外さないと一度有効にした登録が残り続け、
+    // launchd などで自動起動を管理しているときに二重に上がろうとする
+    // （インスタンスロックで片方は落ちるが、ログイン項目に残り続けて分かりにくい）。
+    do {
+        try SMAppService.mainApp.unregister()
+        log.info("ログイン起動を無効にした（登録を外した）")
+    } catch {
+        log.warn("ログイン起動の登録を外せなかった: \(error)")
     }
 }
 

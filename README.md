@@ -78,6 +78,37 @@ open build/comet.app
 log stream --predicate 'subsystem == "local.comet"'
 ```
 
+### 常用の置き場所
+
+**`build/comet.app` は常用に向かない。** `build-app.sh` が毎回消して作り直すため、
+ログイン項目や launchd が指す先が一瞬消える（実際に常駐が落ちた）。
+固定の場所へ入れて、そこから起動する。
+
+```bash
+./scripts/install-app.sh release   # → ~/Applications/comet.app に入れて起動し直す
+```
+
+Nix（home-manager）で管理する場合は、**アプリ本体を Nix store に置かない**こと。
+アクセシビリティ権限はアプリの同一性に紐づくため、store のパスが更新ごとに変わると
+権限が毎回外れて確認ダイアログが出る。設定・自動起動・置き換えたものの無効化だけを
+Nix に持たせ、本体は上のコマンドで固定パスへ置く。
+
+```nix
+# 設定を宣言し、launchd で起動する（例）
+home.file.".config/comet/config.toml".source = ./config/comet/config.toml;
+launchd.agents.comet = {
+  enable = true;
+  config = {
+    ProgramArguments = [ "${config.home.homeDirectory}/Applications/comet.app/Contents/MacOS/comet" ];
+    RunAtLoad = true;
+    KeepAlive = true;   # 落ちても上げ直す
+  };
+};
+```
+
+launchd で起動するなら設定の `start-at-login` は `false` にする
+（`true` のままだと二重に上がろうとする。`false` にすると登録も外れる）。
+
 ### 検証の道具（`comet-probe`）
 
 `verify.sh` から呼ぶ検証専用の実行ファイル。**「目視でしか判定できない」項目を
