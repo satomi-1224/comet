@@ -27,11 +27,23 @@ AGENT="gui/$(id -u)/org.nix-community.home.comet"
 
 "$REPO_ROOT/scripts/build-app.sh" "$CONFIGURATION" || exit 1
 
+PLIST="$HOME/Library/LaunchAgents/org.nix-community.home.comet.plist"
+
 echo "==> 入れ替え: ${DESTINATION}"
 # 動いているものは止める。バンドルを差し替えると署名の検証に失敗して落ちる。
+#
+# **`bootout` したら必ず `bootstrap` で戻す。** 戻さないと launchd の登録が
+# 消えたままになり、以後 `kickstart` が「サービスが無い」で失敗する（実際に踏んだ）。
+WAS_LOADED=0
+if launchctl print "$AGENT" >/dev/null 2>&1; then
+  WAS_LOADED=1
+  echo "    launchd の登録を一旦外す"
+  launchctl bootout "$AGENT" 2>/dev/null || true
+  sleep 2
+fi
 if pgrep -f "$DESTINATION/Contents/MacOS/comet" >/dev/null; then
   echo "    動いている comet を止める"
-  launchctl bootout "$AGENT" 2>/dev/null || pkill -INT -f "$DESTINATION/Contents/MacOS/comet"
+  pkill -INT -f "$DESTINATION/Contents/MacOS/comet" || true
   sleep 3
 fi
 
@@ -39,10 +51,11 @@ mkdir -p "$HOME/Applications"
 rm -rf "$DESTINATION"
 cp -R "$REPO_ROOT/build/comet.app" "$DESTINATION"
 
-# launchd の登録があれば読み直す。無ければ `open` で上げる。
-if launchctl print "$AGENT" >/dev/null 2>&1; then
-  echo "==> launchd の登録を読み直す"
-  launchctl kickstart -k "$AGENT"
+# 外した登録を戻す。登録が無い環境（Nix を使っていない場合）は `open` で上げる。
+if [ "$WAS_LOADED" = "1" ] || [ -f "$PLIST" ]; then
+  echo "==> launchd へ登録して起動する"
+  launchctl bootout "$AGENT" 2>/dev/null || true
+  launchctl bootstrap "$(dirname "$AGENT")" "$PLIST"
 else
   echo "==> launchd の登録が無いので直接起動する"
   open "$DESTINATION"

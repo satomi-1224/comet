@@ -31,7 +31,12 @@ public final class Log: @unchecked Sendable {
 
     private let osLog = os.Logger(subsystem: "local.comet", category: "comet")
 
-    public init() {}
+    public init() {
+        // **行ごとに書き出させる。** launchd などで stderr がファイルへ向くと
+        // ブロックバッファになり、ログが遅れて見える。常駐プロセスの様子を
+        // `tail` で追えないと状態を誤読する（実際に「まだ待機中」と読み違えた）。
+        setvbuf(stderr, nil, _IOLBF, 0)
+    }
 
     public var threshold: LogLevel {
         get { thresholdLock.withLock { $0 } }

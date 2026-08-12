@@ -33,15 +33,29 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
   -addext "extendedKeyUsage=critical,codeSigning" \
   2>/dev/null
 
+# **空パスワードの p12 にしてはいけない。** macOS の openssl は LibreSSL で、
+# 空パスワードで作った p12 は Apple の `security import` が MAC を検証できず
+# 「MAC verification failed during PKCS12 import (wrong password?)」で失敗する（実測）。
+# 使い捨ての乱数を使う。
+# **`tr </dev/urandom | head` は使わない。** head が先に終わると tr が SIGPIPE で
+# 落ち、`set -o pipefail` によってスクリプトが黙って終了する（実際にここで止まった）。
+P12_PASSWORD="$(openssl rand -hex 16)"
 openssl pkcs12 -export -out "$WORK/$IDENTITY.p12" \
   -inkey "$WORK/key.pem" -in "$WORK/cert.pem" \
-  -passout pass:
+  -passout "pass:$P12_PASSWORD"
 
-echo "==> キーチェーンに登録（パスワードを求められる）"
-security import "$WORK/$IDENTITY.p12" -k "$KEYCHAIN" -P "" -T /usr/bin/codesign
+echo "==> キーチェーンに登録"
+security import "$WORK/$IDENTITY.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" \
+  -T /usr/bin/codesign -T /usr/bin/security
 
-echo "==> 信頼設定（パスワードを求められる）"
-security add-trusted-cert -r trustRoot -p codeSign -k "$KEYCHAIN" "$WORK/cert.pem"
+# 署名するだけなら信頼設定は要らない（`codesign -s` は鍵があれば通る）。
+# 付けておくと `codesign -v` での検証も通るが、**管理者パスワードの入力が必要**。
+# 失敗しても署名はできるので、ここで止めない。
+echo "==> 信頼設定（管理者パスワードを求められる。省略しても署名はできる）"
+if ! security add-trusted-cert -r trustRoot -p codeSign -k "$KEYCHAIN" "$WORK/cert.pem" 2>/dev/null
+then
+  echo "    信頼設定は省略した（署名には影響しない）"
+fi
 
 echo
 if security find-identity -v -p codesigning | grep -q "\"$IDENTITY\""; then
