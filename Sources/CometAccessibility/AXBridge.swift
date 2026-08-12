@@ -8,7 +8,7 @@ import CometSupport
 /// - Important: **ここの関数は全て PID ごとのキュー上で呼ぶこと。**
 ///   AX 呼び出しは対象アプリのメインスレッドとの同期 IPC であり、相手がビジーなら
 ///   呼び出し側スレッドがブロックする。メインスレッドから呼ぶと、他人のアプリの
-///   都合で comet 全体が固まる（設計書 §3.1, §4.2）。
+///   都合で comet 全体が固まる。
 public enum AXBridge {
 
     // MARK: - タイムアウト
@@ -147,7 +147,7 @@ public enum AXBridge {
     /// 支援技術向けの非公開属性 `AXEnhancedUserInterface` の値。
     ///
     /// これが `true` のアプリでは、ウィンドウのリサイズに追加処理やアニメーションが
-    /// 挟まり `SetAttributeValue` が顕著に遅くなる（設計書 §3.1 e）。
+    /// 挟まり `SetAttributeValue` が顕著に遅くなる。
     /// 皮肉なことに、**支援技術（= WM 自身）が AX 接続した時点で自動的に `true` に
     /// なる**ことがある。
     public static func enhancedUserInterface(of application: AXUIElement) -> Bool? {
@@ -213,13 +213,13 @@ public enum AXBridge {
     /// 一方、**サイズは現在位置から画面端までに頭打ちされる**。したがって古い位置のまま
     /// 先にサイズを設定すると、移動先では収まるはずの幅が切り詰められる。
     ///
-    /// Phase 1 の実機検証で確認した例:
+    /// 実機で確認した例:
     /// x=1707 にあるウィンドウを (5, 61) 1273×1598 へ動かす際、サイズを先に設定すると
     /// 幅が **853 = 2560 − 1707**、つまり画面右端までの残り幅に切り詰められた。
     /// 位置を先に設定すればこの頭打ちは起きない。
     ///
     /// - Parameters:
-    ///   - current: 直前に観測した矩形。現状は使わないが、Phase 4 の補正判定で使う。
+    ///   - current: 直前に観測した矩形。適用の前後を比べる呼び出し側のために受ける。
     ///   - setSize: `false` なら位置だけを設定して IPC を1回に減らす。
     /// - Returns: 設定の成否と、設定直後に読み戻した実際の矩形。
     public static func applyFrame(

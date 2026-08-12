@@ -1109,7 +1109,7 @@ else
 fi
 
 # ---- 15. アプリ・ウィンドウの巡回 ------------------------------------------
-# Hammerspoon の Alt+F / Alt+D を comet へ移したもの（設計書 §12.3）。
+# Hammerspoon の Alt+F / Alt+D を comet へ移したもの。
 # 「前面のアプリが変わったか」は System Events から独立に読めるので、それで判定する。
 echo "==> 15. アプリとウィンドウを巡回できるか"
 if [ -z "$CREATED_WINDOW_IDS" ]; then

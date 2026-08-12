@@ -8,11 +8,8 @@ import CometInput
 import CometSupport
 import ServiceManagement
 
-// Phase 1 の到達点:
-//   「ウィンドウを開くと自動的にタイルされ、閉じると再配置される」
-//
 // main.swift のトップレベルコードは Swift 6 では @MainActor 隔離される。
-// ここから同期 AX 呼び出しを行わないという規律は最後まで維持すること（設計書 §4.2）。
+// ここから同期 AX 呼び出しを行わないという規律は最後まで維持すること。
 
 // MARK: - ヘルパー
 
@@ -179,7 +176,7 @@ func reportConfigProblems(_ problems: [Problem]) {
 reportConfigProblems(configuration.problems)
 
 // 非公開シンボルの解決状況を起動時に記録しておく。
-// OS アップデートで消えた場合、ここが最初の手がかりになる（設計書 §12.2）。
+// OS アップデートで消えた場合、ここが最初の手がかりになる。
 if AXPrivate.isGetWindowAvailable {
     log.debug("_AXUIElementGetWindow を解決した")
 } else {
@@ -187,7 +184,7 @@ if AXPrivate.isGetWindowAvailable {
         """
         _AXUIElementGetWindow を解決できなかった。
         この OS ではウィンドウ ID を AX 要素から取得できない。
-        設計書 §12.2 のフォールバックが必要。
+        ウィンドウ ID を別の手段で得るフォールバックが必要。
         """)
 }
 
@@ -310,7 +307,7 @@ if engine.isTimingEnabled {
 // MARK: - 設定によるホットキー
 
 // 複数コマンドの割り当ては**まとめて1回の再配置**にする。中間状態を適用しないことで
-// 「ウィンドウ移動 + 切替」が1フレームで完了する（設計書 §9.5）。
+// 「ウィンドウ移動 + 切替」が1フレームで完了する。
 // 押しっぱなしでコマンドを繰り返すための仕掛け。
 //
 // **Carbon のホットキーはキー連射では繰り返し発火しない**（実測で 15 回送って 1 回）。

@@ -64,7 +64,7 @@ public enum Geometry {
     ///   混ぜると退避先が無意味に遠ざかる。
     ///
     /// - Important: モニタを付け替えると union が変わる。**退避中のウィンドウを
-    ///   新しい退避先へ動かし直さないと、画面の中に現れる**（設計書 §7.6 手順5）。
+    ///   新しい退避先へ動かし直さないと、画面の中に現れる**。
     public static func stashOrigin(outside monitors: [CGRect], margin: CGFloat = 100_000)
         -> CGPoint
     {

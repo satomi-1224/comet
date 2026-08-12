@@ -1,6 +1,6 @@
 import Foundation
 
-/// 速さと堅牢性のつまみ（設計書 §9.2 の `[performance]`）。
+/// 速さと堅牢性のつまみ。
 public struct PerformanceOptions: Sendable, Equatable {
 
     /// AX メッセージングのタイムアウト。
@@ -18,7 +18,7 @@ public struct PerformanceOptions: Sendable, Equatable {
     /// ウィンドウ操作を遅くする `AXEnhancedUserInterface` を無効化するか。
     public var disablesEnhancedUserInterface: Bool
 
-    /// 適用のレイテンシをアプリ別に集計するか（設計書 §11.3）。
+    /// 適用のレイテンシをアプリ別に集計するか。
     public var isTimingEnabled: Bool
 
     /// ホットキーを押しっぱなしにしてから繰り返しが始まるまで。

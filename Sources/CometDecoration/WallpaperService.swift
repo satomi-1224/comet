@@ -7,7 +7,7 @@ import CometSupport
 ///
 /// 現行の `osascript` 経由（bash 起動 + AppleScript 処理系の初期化 + System Events への
 /// AppleEvent）は概ね 0.2〜1.5 秒かかる。`NSWorkspace.setDesktopImageURL` を
-/// プロセス内で直接呼べば数 ms で済む（設計書 §2.2, §8.3）。
+/// プロセス内で直接呼べば数 ms で済む。
 @MainActor
 public final class WallpaperService {
 

@@ -11,7 +11,7 @@ import Darwin
 ///
 /// - Important: `@_silgen_name` による直接リンクは、OS アップデートでシンボルが
 ///   消えた場合に**起動時のリンクエラーでクラッシュする**。ここでは `dlsym` で
-///   動的に解決し、欠落を実行時に検出できるようにしている（設計書 §12.2）。
+///   動的に解決し、欠落を実行時に検出できるようにしている。
 public enum AXPrivate {
 
     public typealias GetWindowFunction = @convention(c) (

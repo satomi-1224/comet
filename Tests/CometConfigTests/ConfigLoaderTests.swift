@@ -276,7 +276,7 @@ struct ConfigLoaderTests {
         #expect(configuration.problems.contains { $0.kind == .invalidValue })
     }
 
-    @Test("Phase 4 のつまみを読める")
+    @Test("速さと堅牢性のつまみを読める")
     func parsesPhase4Options() throws {
         let configuration = try ConfigLoader.parse(
             """
@@ -325,7 +325,7 @@ struct ConfigLoaderTests {
         #expect(!configuration.problems.contains { $0.kind == .noBindings })
     }
 
-    @Test("Phase 4 のつまみの既定値")
+    @Test("速さと堅牢性のつまみの既定値")
     func phase4Defaults() {
         let fallback = Configuration()
         #expect(fallback.focusFollowsActivation, "既定で追従する")
@@ -333,7 +333,7 @@ struct ConfigLoaderTests {
         #expect(!fallback.performance.isTimingEnabled, "計測は既定で切る")
     }
 
-    @Test("既定の設定は Phase 4 のつまみを明示している")
+    @Test("既定の設定は 速さと堅牢性のつまみを明示している")
     func builtInConfigurationDocumentsPhase4Options() throws {
         let configuration = try ConfigLoader.parse(Configuration.defaultTOML)
         #expect(configuration.focusFollowsActivation)

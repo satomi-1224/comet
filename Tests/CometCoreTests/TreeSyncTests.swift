@@ -76,7 +76,7 @@ struct TreeSyncTests {
 
     // MARK: - 挿入の戦略
 
-    // Phase 1 で実機検証した dwindle の形を、BSP ツリーの上で再現できること。
+    // 実機で確かめた dwindle の形を、BSP ツリーの上で再現できること。
     @Test("split では枚数を増やすと dwindle の形になる")
     func splitStrategyReproducesDwindle() {
         let root = ContainerNode(orientation: .horizontal)

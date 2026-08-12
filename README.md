@@ -5,458 +5,293 @@
 <h1 align="center">comet</h1>
 
 <p align="center">
-  <b>macOS 向けのタイリングウィンドウマネージャ</b><br>
-  AeroSpace + Hammerspoon の2プロセス構成を、Swift 製の単一プロセスに置き換える
+  <b>macOS 向けのタイリングウィンドウマネージャ</b>
 </p>
 
 <p align="center">
-  <sub>
-    単体テスト 549 件 ・ 実機検証 53 項目 ・ 潰すべき4症状はすべて実測で解消
-  </sub>
+  <img src="https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey" alt="platform">
+  <img src="https://img.shields.io/badge/Swift-6.0-orange" alt="swift">
+  <img src="https://img.shields.io/badge/license-MIT-blue" alt="license">
 </p>
 
-設計の全体像・性能問題の分析・実装フェーズは [DESIGN.md](DESIGN.md) を参照。
+BSP ツリーでウィンドウを自動的に並べ、キーボードだけで操作できるようにします。
+ワークスペース・フォーカス枠線・ワークスペースごとの壁紙まで**1つのプロセス**で完結し、
+補助のスクリプトランタイムを必要としません。
 
-## 現在の状態
+```
+┌──────────────────┬──────────────────┐
+│                  │                  │
+│                  │     Terminal     │
+│     Browser      ├──────────────────┤
+│                  │                  │
+│                  │      Editor      │
+└──────────────────┴──────────────────┘
+   alt-h/j/k/l でフォーカス、alt-shift-… で移動、alt-1..0 でワークスペース
+```
 
-**Phase 6（常用化）まで実装済み。潰すべき4症状はすべて実測で解消を確認した。**
+## 特長
 
-- ウィンドウを開くと自動でタイルされ、閉じると再配置される
-- `focus` / `move` / `resize` / `join-with` / `layout` / `fullscreen` が動く
-- `alt-f` で次のアプリ、`alt-d` で同じアプリの次のウィンドウへ（最近使った順）
-- ワークスペース 10 個。`alt-1`..`alt-0` で切替、`alt-shift-1`..で移動して追従、`alt-tab` で直前へ
-- ワークスペースごとの壁紙。**ディレクトリを1つ指定すれば名前順に割り当てる**
-- **メインディスプレイだけを制御。** サブディスプレイは素の macOS のまま使える
-- 設定ファイル（`~/.config/comet/config.toml`）で間隔・キーバインド・ウィンドウルール・
-  巡回の挙動・繰り返しの速さまで変えられる
-- 寸法を無視するアプリは自動でフローティングへ降格する
-- `[debug] timing = true` + `ctrl-alt-shift-t` でアプリ別の適用レイテンシが出る
-- フォーカス枠線・ワークスペースインジケータ（メニューバー + HUD）・壁紙切替
-- 設定は**保存すると自動で読み直す**（ツリーの形は保たれる）
-- ログイン起動（`start-at-login = true`）
+- **開いたら並ぶ** — ウィンドウを開くと自動でタイルされ、閉じると残りが詰まる
+- **キーボード操作** — フォーカス・移動・リサイズ・分割方向の切替・フローティング切替
+- **ワークスペース 10 個** — macOS の操作スペースを使わないので**切替にアニメーションが挟まらない**
+- **レイアウトを強制する** — 掴んで動かされても、外部から座標を書き換えられても元へ戻す
+- **メインディスプレイだけを制御** — サブディスプレイは素の macOS のまま自由に使える
+- **内蔵の見た目** — フォーカス枠線、ワークスペース番号（メニューバー / HUD）、
+  ワークスペースごとの壁紙
+- **設定は TOML 1枚** — 保存すると自動で読み直す（ツリーの形は保たれる）
+- **単一プロセス** — 常駐は comet だけ。CPU はほぼ 0%、メモリは 40MB 前後
 
-置き換えの動機だった4症状は、`./scripts/verify.sh` で機械的に判定している。
+## 動作要件
 
-| | 症状 | 実測 |
+- macOS 14 以降
+- Swift 6 ツールチェイン（Xcode は不要。Command Line Tools だけで組める）
+- アクセシビリティ権限
+
+## インストール
+
+```bash
+git clone https://github.com/satomi-1224/comet.git
+cd comet
+
+# 1. 署名 ID を作る（一度だけ。省略すると入れ替えのたびに権限を求められる）
+./scripts/make-signing-cert.sh
+
+# 2. .app を組み立てて ~/Applications へ入れる
+./scripts/install-app.sh release
+
+# 3. 設定の雛形を置く
+mkdir -p ~/.config/comet
+./build/comet.app/Contents/MacOS/comet --print-default-config > ~/.config/comet/config.toml
+```
+
+初回起動時に**アクセシビリティ権限**を求められます。
+「システム設定 > プライバシーとセキュリティ > アクセシビリティ」で許可してください。
+
+> [!IMPORTANT]
+> **アクセシビリティ権限はコード署名の同一性に紐づきます。** ad-hoc 署名のままだと
+> 内容が変わるたびにハッシュが変わり、入れ替えるたびに許可を求められます。
+> `make-signing-cert.sh` で固定の署名 ID を作っておくと出なくなります。
+
+### 必要なシステム設定
+
+| 設定 | 値 | 理由 |
 |---|---|---|
-| A | 新規ウィンドウがデフォルト位置に一瞬出てから飛ぶ | 既定位置に居るのは **14〜24ms**（1〜1.5フレーム） |
-| B | リサイズ連打で追従しない・飛ぶ・戻る | 押しっぱなしで約 **30Hz** 追従 |
-| C | ワークスペース切替が遅い・ちらつく | 切替後に最初に撮れた1枚（**~60〜110ms**）で前のウィンドウが残っていない |
-| D | 壁紙変更がワンテンポ遅れる | 同じ1枚で既に新しい壁紙（旧構成は **0.2〜1.5 秒**） |
+| Mission Control > ディスプレイごとに個別の操作スペース | オフ | 操作スペースが分かれるとワークスペースの管理と衝突する |
+| Mission Control > 最新の使用状況に基づいて操作スペースを自動的に並べ替える | オフ | 並び順が動くと切替先が定まらない |
+| Stage Manager | オフ | ウィンドウの位置を横取りされる |
+| アクセシビリティ > 視差効果を減らす | オン（推奨） | 切替が速く見える |
 
-進捗の詳細は [PROGRESS.md](PROGRESS.md)。
+### ログイン時に起動する
 
-## 必要なもの
+設定に `start-at-login = true` を書くか、launchd へ登録します。
 
-- macOS 14 以降（開発環境は 26.5.2 で検証）
-- Swift 6.0 以降（Command Line Tools のみで可。Xcode は不要）
-
-Xcode を入れていない場合、SPM は `Testing.framework` を自動では見つけられない。
-`scripts/env.sh` が探索パスと rpath を補うので、テストは `swift test` ではなく
-`./scripts/test.sh` を使うこと。
+```bash
+open ~/Applications/comet.app     # 常駐起動（終了は ctrl-alt-shift-q）
+```
 
 ## 使い方
 
-```bash
-# 単体テスト
-./scripts/test.sh
+既定のキーバインド（すべて設定で変更できます）。
 
-# 実機検証（AeroSpace を止めて実際に動かし、終わったら戻す）
-./scripts/verify.sh
-
-# 常駐コストの10分放置まで含める
-./scripts/verify.sh --long
-
-# .app を組み立てる（アクセシビリティ権限に必要）
-./scripts/build-app.sh release
-
-# 前景で起動。ログが端末に出る。終了は Ctrl-C か ctrl-alt-shift-q
-build/comet.app/Contents/MacOS/comet --log-level debug
-
-# 常駐起動。ログは統一ログへ
-open build/comet.app
-log stream --predicate 'subsystem == "local.comet"'
-```
-
-### 常用の置き場所
-
-**`build/comet.app` は常用に向かない。** `build-app.sh` が毎回消して作り直すため、
-ログイン項目や launchd が指す先が一瞬消える（実際に常駐が落ちた）。
-固定の場所へ入れて、そこから起動する。
-
-```bash
-./scripts/install-app.sh release   # → ~/Applications/comet.app に入れて起動し直す
-```
-
-Nix（home-manager）で管理する場合は、**アプリ本体を Nix store に置かない**こと。
-アクセシビリティ権限はアプリの同一性に紐づくため、store のパスが更新ごとに変わると
-権限が毎回外れて確認ダイアログが出る。設定・自動起動・置き換えたものの無効化だけを
-Nix に持たせ、本体は上のコマンドで固定パスへ置く。
-
-```nix
-# 設定を宣言し、launchd で起動する（例）
-home.file.".config/comet/config.toml".source = ./config/comet/config.toml;
-launchd.agents.comet = {
-  enable = true;
-  config = {
-    ProgramArguments = [ "${config.home.homeDirectory}/Applications/comet.app/Contents/MacOS/comet" ];
-    RunAtLoad = true;
-    KeepAlive = true;   # 落ちても上げ直す
-  };
-};
-```
-
-launchd で起動するなら設定の `start-at-login` は `false` にする
-（`true` のままだと二重に上がろうとする。`false` にすると登録も外れる）。
-
-### 検証の道具（`comet-probe`）
-
-`verify.sh` から呼ぶ検証専用の実行ファイル。**「目視でしか判定できない」項目を
-機械に判定させる**ために、撮った画面の画素とウィンドウの実座標を読む。
-
-```bash
-screencapture -x /tmp/screen.png
-
-# 枠線が目標の矩形に描かれているか（四辺に色が乗っている割合）
-.build/debug/comet-probe edges /tmp/screen.png '#ff00ff' --rect 6,62,1274,1596 --inset 14
-
-# 画面に出ているウィンドウの実座標（アクセシビリティ権限は要らない）
-.build/debug/comet-probe windows
-
-# 新しく現れたウィンドウが落ち着くまでを追う（症状A の計測）
-.build/debug/comet-probe watch --new --ms 4000
-```
-
-撮影そのものは `screencapture` に任せている。**画面収録の権限を comet 側に
-要求しないため**で、端末が既に持っている権限で撮った PNG を読むだけにしてある。
-
-### アイコンを作り直す
-
-```bash
-# 全面が絵柄の画像から、範囲を指定して角を丸める（今のアイコンはこれ）
-./scripts/make-icon.sh ~/Desktop/image.png \
-  --crop 1600,0,1200,1200 --corner-radius 22 --margin 8
-
-# 余白と影が付いた画像から、背景を抜いて図形へ切り詰める
-./scripts/make-icon.sh ~/Desktop/icon.png --tolerance 100
-
-./scripts/build-app.sh release   # バンドルへ入る
-```
-
-- `--crop` を渡すと**背景の除去はしない**。余白の無い画像で走らせると、外周と繋がった
-  暗い部分（夜空など）まで抜けて穴が空くため
-- `--tolerance` は背景とみなす色の幅。**色だけで一律に抜くのではなく外周から繋がった
-  部分だけを抜く**ので、大きくしても図形の中の明るい部分（グロウ）は消えない
-- `--corner-radius` は**絵柄の一辺**に対する割合。macOS のアイコンは 22 前後
-- `--margin` は canvas に対する余白の割合。**入れないと他のアプリより2割大きく見える。**
-  macOS 純正は 8〜9（実測: 電卓は 1024 の canvas に絵柄 850 = 占有率 83%。
-  今の comet は 84%）
-
-### コマンド
-
-設定の `[mode.main.binding]` に書ける。綴りは AeroSpace 互換。
-
-| コマンド | 動作 |
+| キー | 動作 |
 |---|---|
-| `focus left\|down\|up\|right` | 方向フォーカス |
-| `move left\|down\|up\|right` | ウィンドウを方向へ移動 |
-| `resize width\|height ±N` | 分割の境界を動かす |
-| `join-with left\|down\|up\|right` | 隣と新しいコンテナを作る |
-| `layout tiles horizontal vertical` | 親コンテナの向きを巡回 |
-| `layout floating tiling` | フローティングとタイルを切替 |
-| `workspace 1..N\|back-and-forth` | ワークスペース切替 |
-| `move-node-to-workspace N` | ウィンドウを別のワークスペースへ |
-| `close-window` | ウィンドウを閉じる |
-| `reload-config` | 設定を読み直す |
-| `fullscreen` | フォーカス中のウィンドウを領域いっぱいに広げる／戻す（トグル） |
-| `focus next-app\|prev-app` | 次／前のアプリのウィンドウへ（最近使った順） |
-| `focus next-window-in-app\|prev-window-in-app` | 同じアプリの次／前のウィンドウへ |
+| `alt-h` `alt-j` `alt-k` `alt-l` | 左・下・上・右のウィンドウへフォーカス |
+| `alt-shift-h/j/k/l` | ウィンドウを左・下・上・右へ移動 |
+| `alt-ctrl-h/j/k/l` | 分割の境界を動かす（リサイズ・押しっぱなしで連続） |
+| `alt-f` / `alt-d` | 次のアプリ / 同じアプリの次のウィンドウへ |
+| `alt-e` / `alt-w` | 隣とまとめて新しいコンテナを作る |
+| `alt-slash` | 親コンテナの向きを切り替える |
+| `alt-shift-f` | フローティングとタイルを切り替える |
+| `alt-semicolon` | フォーカス中のウィンドウを領域いっぱいに広げる／戻す |
+| `alt-1` … `alt-0` | ワークスペース 1〜10 へ切替 |
+| `alt-shift-1` … `alt-shift-0` | ウィンドウを別のワークスペースへ移動して追従 |
+| `alt-tab` | 直前のワークスペースへ |
 
-`fullscreen` は**macOS のネイティブフルスクリーンではない**。あれは専用の操作スペースを
-作るためワークスペースの実装と衝突する。タイル配置の中で1枚だけ広げ、後ろのウィンドウは
-配置を保ったまま覆う（もう一度押すと元に戻る）。
-
-未対応: `move-node-to-monitor` / `focus-monitor` / `move-workspace-to-monitor`
-（**2台目のモニタが無いと検証できない**）、`mode`（モーダルなキー層）、
-`flatten-workspace-tree`。書いてあっても起動時に飛ばされる。
-
-### オプション
-
-| オプション | 内容 |
-|---|---|
-| `--log-level <level>` | `trace` / `debug` / `info` / `warn` / `error` / `off`。既定は設定ファイルの値、無ければ `info` |
-| `--config <path>` | 設定ファイルの場所。既定は `~/.config/comet/config.toml` |
-| `--no-config` | 設定ファイルを読まず組み込みの既定で起動する |
-| `--print-default-config` | 組み込みの既定設定を出力して終了。設定ファイルの雛形になる |
-| `--preview-layout <n>` | n 枚のときの配置を図示して終了。**ウィンドウには一切触れない** |
-| `--dry-run` | 配置を計算するがウィンドウは動かさない。他の WM が動いている環境での検証用 |
-| `--run <command>` | 起動後にコマンドを実行する。複数回指定可。ホットキーを押せない環境での検証用 |
-| `--emit-key <spec[:n]>` | 合成キーを送って終了する。n を 2 以上にすると押しっぱなしを再現する（検証用） |
-| `--emit-drag <x,y:dx,dy>` | 合成ドラッグを送って終了する（検証用） |
-| `--hotkey <spec>` | 押下をログに出すだけの確認用ホットキー。複数回指定可 |
-| `--print-keys` | 指定できるキー名を一覧表示 |
-| `--help` | ヘルプ |
-
-常駐中のホットキー（設定とは別に固定）:
+設定とは別に固定のホットキーが3つあります。
 
 | キー | 内容 |
 |---|---|
-| `ctrl-alt-shift-q` | 終了 |
+| `ctrl-alt-shift-q` | 終了（退避中のウィンドウを画面へ戻してから終わる） |
 | `ctrl-alt-shift-r` | 再配置（全ワークスペースの状態をログに出す） |
-| `ctrl-alt-shift-t` | 適用レイテンシの出力（`[debug] timing = true` のとき） |
-
-ホットキーの書式は `alt-shift-h` のように修飾キーとキーをハイフンで連ねる。
-修飾キーは `cmd` / `alt` / `ctrl` / `shift`（別名 `command` / `opt` / `option` / `control`）。
-`-` 自体をキーに指定するときは `minus` と綴る。
+| `ctrl-alt-shift-t` | 適用レイテンシをアプリ別に出力（`[debug] timing = true` のとき） |
 
 ## 設定
 
-```bash
-# 雛形を書き出す
-mkdir -p ~/.config/comet
-comet --print-default-config > ~/.config/comet/config.toml
+`~/.config/comet/config.toml`。`--print-default-config` が全項目入りの雛形を出します。
+**保存すると自動で読み直します**（ツリーの形とワークスペースの状態は保たれます）。
+
+```toml
+[gaps]
+inner-horizontal = 3
+inner-vertical   = 3
+outer-top        = 3
+outer-bottom     = 3
+outer-left       = 3
+outer-right      = 3
+
+[border]
+enabled       = true
+width         = 2.0
+radius        = 10.0
+color-focused = "#7aa2f7"
+
+[wallpaper]
+dir = "~/Pictures/wallpapers"
+
+[mode.main.binding]
+alt-h = "focus left"
+alt-l = "focus right"
+alt-1 = "workspace 1"
 ```
 
-既定のキーバインドは現行 AeroSpace 設定の移植で、`alt-hjkl`（フォーカス）/
-`alt-shift-hjkl`（移動）/ `alt-ctrl-hjkl`（リサイズ）/ `alt-e`・`alt-w`（まとめる）/
-`alt-slash`（向きの切替）/ `alt-shift-f`（フローティング切替）/
-`alt-1`..`alt-0`（ワークスペース切替）/ `alt-shift-1`..（移動して追従）/ `alt-tab`（直前へ）。
+**設定の誤りで起動は止まりません。** 解釈できなかった項目は既定値に落ち、
+理由が起動時のログに残ります。
 
-**設定の誤りで起動は止まらない。** 解釈できなかった項目は既定値に落ち、
-理由が起動時のログに出る。
-
-新しいウィンドウの入り方は 2 通りから選べる。
-
-| `[layout] insertion` | 動き |
+| セクション | 主な項目 |
 |---|---|
-| `split`（既定） | フォーカス中のウィンドウの領域を分割して入る（dwindle） |
-| `sibling` | フォーカス中のウィンドウの隣に並べる（AeroSpace と同じ） |
+| `[gaps]` | ウィンドウ同士（`inner-*`）と画面の縁（`outer-*`）の間隔 |
+| `[border]` | フォーカス枠線の有無・幅・角の丸み・色 |
+| `[indicator]` | ワークスペース番号の出し方（`menubar` / `hud` / `both` / `off`） |
+| `[wallpaper]` | ワークスペースごとの壁紙（`dir` かパスの対応表） |
+| `[workspaces]` | 個数、非表示の方式、Cmd+Tab で切り替わったときの追従 |
+| `[layout]` | 新しいウィンドウの入り方、ルートの分割方向 |
+| `[focus]` | アプリ・ウィンドウ巡回の並びの寿命と範囲 |
+| `[performance]` | AX のタイムアウト、適用の間隔、キー連射の速さ |
+| `[[window-rule]]` | アプリごとの扱い（`layout floating` など） |
+| `[debug]` | ログの粒度、レイテンシの計測 |
 
-`--preview-layout <n>` で、ウィンドウに触れずに枚数ごとの配置を確認できる。
+### 壁紙
 
-### アプリ・ウィンドウの巡回
-
-既定では `alt-f` が次のアプリ、`alt-d` が同じアプリの次のウィンドウ（Hammerspoon から移植）。
-
-| 設定 | 内容 |
-|---|---|
-| `[focus] cycle-reset-ms` | 続けて押したときに**同じ並びを使い続ける**時間。既定 1500。0 にすると毎回組み直す |
-| `[focus] cycle-scope` | `workspace`（既定・表示中のワークスペースだけ）/ `all`（全ワークスペース。行き先へ自動で切り替わる） |
-
-アプリの並びは**最近使った順**で、各アプリの代表はそのアプリで最後に見ていたウィンドウ。
-`cycle-reset-ms` の間は並びを組み直さないので、押し続けると3つ目・4つ目へ進める
-（毎回組み直すと2つのアプリを往復するだけになる）。
-
-同じアプリ内の巡回は id の昇順の固定の輪なので、3枚以上あっても順に回れる。
-
-### 速さと間隔
-
-| 設定 | 内容 |
-|---|---|
-| `[gaps] inner-*` | アプリ間の間隔（既定 3）。**`[border] width` より広くすること**（枠線が隣の中身に重なる） |
-| `[gaps] outer-*` | 画面の縁との間隔（既定 3） |
-| `[performance] repeat-delay-ms` | ホットキーを押しっぱなしにしてから繰り返しが始まるまで（既定 250） |
-| `[performance] repeat-interval-ms` | 繰り返しの間隔（既定 30 ≒ 30Hz）。**保存しただけで効く** |
-| `[performance] ax-timeout-ms` | AX の応答待ちの上限（既定 100）。ハングしたアプリを短く見切る |
-| `[performance] apply-interval-ms` | 目標矩形を流す間隔（既定 8 ≒ 120Hz） |
-| `[performance] max-correction-retries` | 目標とずれたときに投げ直す上限（既定 3）。超えるとフローティングへ降格 |
-
-繰り返しの対象は `resize` だけ。`move` や `workspace` が連射されるとウィンドウが
-飛んでいって収拾がつかないため。
-
-### 見た目
-
-| 設定 | 内容 |
-|---|---|
-| `[border]` | フォーカス中のウィンドウに重ねる枠線。線の幅だけ外側に広がるのでギャップの中に収まる |
-| `[indicator]` | ワークスペース番号。`menubar` / `hud` / `both` / `off` |
-| `[wallpaper] dir` | 画像を入れたディレクトリ。**これだけ書けば済む** |
-| `[wallpaper.map]` | ワークスペース番号 → 画像パス。`dir` より優先する |
+ディレクトリを1つ指定すれば、画像を**名前順**にワークスペースへ割り当てます。
+足りなければ先頭から繰り返します（3枚なら 1・2・3・1・2・3…）。
 
 ```toml
 [wallpaper]
 dir = "~/Pictures/wallpapers"
 ```
 
-ディレクトリの画像を**名前順**（Finder と同じ並びなので `2.png` が `10.png` より前）に
-ワークスペースの数まで取り、**足りなければ先頭から繰り返す**。
-3枚をワークスペース10個に割り当てると 1・2・3・1・2・3・1・2・3・1 になる。
+画像以外のファイルと隠しファイルは数に入れません。
+**ディレクトリが無い、または画像が1枚も無いときは壁紙を変えません。**
 
-- 画像以外のファイル（`.DS_Store` やメモ）と隠しファイルは数に入れない
-- **ディレクトリが無い / 画像が1枚も無いときは壁紙を変えない**
-- 個別に差し替えたいワークスペースだけ `[wallpaper.map]` に書く
+### コマンド
 
-壁紙のパスは起動時に実在を確認し、無いものは警告して捨てる。
+`[mode.main.binding]` に書けるコマンド。綴りは [AeroSpace](https://github.com/nikitabobko/AeroSpace) 互換です。
 
-### ワークスペース
-
-macOS ネイティブの Spaces は常に1つだけ使い、非表示のワークスペースは
-**アプリごと非表示にする**（`Cmd+H` 相当）ことで隠す。切替に OS のアニメーションが挟まらない。
-
-| `[workspaces] hidden` | 動き |
+| コマンド | 動作 |
 |---|---|
-| `hide-app`（既定） | アプリごと非表示。**完全に消え、Mission Control にも出ない** |
-| `off-screen` | 画面の隅へ追い込む。**1pt × 46pt の角が残る**（macOS はウィンドウを画面外へ出させない） |
+| `focus left\|down\|up\|right` | 方向フォーカス |
+| `focus next-app\|prev-app` | 次／前のアプリのウィンドウへ（最近使った順） |
+| `focus next-window-in-app\|prev-window-in-app` | 同じアプリの次／前のウィンドウへ |
+| `move left\|down\|up\|right` | ウィンドウを方向へ移動 |
+| `resize width\|height ±N` | 分割の境界を動かす |
+| `join-with left\|down\|up\|right` | 隣と新しいコンテナを作る |
+| `layout tiles horizontal vertical` | 親コンテナの向きを巡回 |
+| `layout floating tiling` | フローティングとタイルを切替 |
+| `fullscreen` | 領域いっぱいに広げる／戻す（トグル） |
+| `workspace 1..N\|back-and-forth` | ワークスペース切替 |
+| `move-node-to-workspace N` | ウィンドウを別のワークスペースへ |
+| `close-window` | ウィンドウを閉じる |
+| `reload-config` | 設定を読み直す |
 
-`hide-app` は粒度がアプリ単位なので、**そのアプリの全ウィンドウが非表示ワークスペースに
-あるときだけ**使える。表示中のワークスペースにもウィンドウを持つアプリ（Chrome を
-ws1 と ws2 で使うなど）は自動的に隅寄せへ落ちる。
+`fullscreen` は **macOS のネイティブフルスクリーンではありません**。
+あれは専用の操作スペースを作るためワークスペースの実装と衝突します。
+タイル配置の中で1枚だけ広げ、後ろのウィンドウは配置を保ったまま覆います。
 
-**Cmd+Tab には非表示アプリも出る。** そこから選ぶとアプリごと表示に戻り、
-そのウィンドウのワークスペースへ自動で切り替わる（`focus-follows-activation`）。
+### コマンドラインオプション
 
-`ctrl-alt-shift-q` で終了すると、退避していたウィンドウは画面へ戻してから終わる。
-`kill` で落とすと画面外に残るので注意。
-
-### 複数ディスプレイ
-
-**制御するのはメインディスプレイ（メニューバーがある画面）だけ。**
-サブディスプレイへ置いたウィンドウは管理対象から外れ、**素の macOS と同じように
-自由に動かせる・大きさも変えられる**。タイルの対象にもならず、ワークスペースを
-切り替えても消えない。
-
-- ウィンドウの**中心が乗っている画面**でどちらのものかを決める
-- メインからサブへドラッグすると、その時点で管理から外れる（引き戻さない）
-- サブからメインへ戻すと、再びタイル配置に入る
-- サブにウィンドウを持つアプリは**アプリごと非表示にしない**
-  （`Cmd+H` 相当はアプリの全ウィンドウを消すため、サブ側まで消えてしまう）
-
-以下のシステム設定が前提になる。
-
-| 設定 | 値 |
+| オプション | 内容 |
 |---|---|
-| Mission Control > ディスプレイごとに個別の操作スペース | オフ |
-| Mission Control > 最新の使用状況に基づいて操作スペースを自動的に並べ替える | オフ |
-| Stage Manager | オフ |
-| アクセシビリティ > 視差効果を減らす | オン推奨 |
+| `--config <path>` | 設定ファイルの場所（既定 `~/.config/comet/config.toml`） |
+| `--no-config` | 設定を読まず組み込みの既定で起動する |
+| `--print-default-config` | 既定設定を出力して終了（雛形になる） |
+| `--log-level <level>` | `trace` / `debug` / `info` / `warn` / `error` / `off` |
+| `--preview-layout <n>` | n 枚のときの配置を図示して終了。**ウィンドウには触れない** |
+| `--dry-run` | 配置を計算するがウィンドウは動かさない |
+| `--print-keys` | 指定できるキー名の一覧 |
+| `--help` | ヘルプ |
 
-## セットアップ
+## しくみ
 
-```bash
-# 1. 署名 ID を作る（一度だけ。下の「1.」参照）
-./scripts/make-signing-cert.sh
+### ワークスペースに macOS の操作スペースを使わない
 
-# 2. .app を組み立てる
-./scripts/build-app.sh release
+ネイティブの Spaces は切替に OS のアニメーションが挟まり、外部から制御する公式の API も
+ありません。comet は**操作スペースを常に1つだけ使い**、非表示のワークスペースは
+アプリごと非表示（`Cmd+H` 相当）にして隠します。
 
-# 3. 設定の雛形を置く
-mkdir -p ~/.config/comet
-./build/comet.app/Contents/MacOS/comet --print-default-config > ~/.config/comet/config.toml
+そのアプリのウィンドウが表示中のワークスペースにも残っている場合は、代わりに
+画面の外へ追い出します（macOS はウィンドウを完全に画面外へは出させないため、
+1pt × 46pt の角だけが残ります）。
 
-# 4. macOS のシステム設定を合わせる（下の「3.」参照）
+### AX の呼び出しは相手アプリごとのキューで行う
 
-# 5. AeroSpace を止める
-osascript -e 'quit app "AeroSpace"'
+Accessibility API の呼び出しは**相手アプリのメインスレッドとの同期 IPC** です。
+相手がビジーなら呼び出し側のスレッドが止まります。メインスレッドから呼ぶと、
+他人のアプリの都合で comet 全体（ホットキーも描画も）が固まります。
 
-# 6. 前景で起動して様子を見る
-./build/comet.app/Contents/MacOS/comet --log-level debug
+そのため AX 呼び出しはすべてプロセスごとのキューへ逃がし、タイムアウトを短く
+設定して「そのアプリだけ諦める」ようにしています。
 
-# 7. 問題なければ常駐に切り替え、設定に start-at-login = true を書く
-open build/comet.app
-```
+### レイアウトを強制する
 
-### 1. 署名 ID を作る（推奨・一度だけ）
+ウィンドウが外部から動かされたら元へ戻します。AX の通知だけでは取りこぼす
+（こちらが戻した直後に書き戻されると、以降は通知が来ない）ため、
+`CGWindowList` で定期的に実際の矩形を見張ります。AX の往復が要らないので、
+ハングしたアプリが混ざっていても止まりません。
 
-アクセシビリティ権限はコード署名の同一性に紐づく。ad-hoc 署名はビルドのたびに
-ハッシュが変わるため、**再ビルドすると権限が外れて再許可を求められる**。
+どうやっても目標に落ち着かないウィンドウ（文字セル単位でしかリサイズできない端末など）
+とは押し合いを続けず、数回で一旦諦めてしばらく待ちます。
 
-```bash
-./scripts/make-signing-cert.sh
-```
+### 並べる対象の見分け方
 
-キーチェーンのパスワード入力を求められる。初回の `codesign` で出るアクセス許可は
-「常に許可」を選ぶこと。
+ダイアログやポップオーバーを掴むとアプリが壊れて見えるので、`AXStandardWindow` の
+ウィンドウだけを並べます。加えて**ピクチャーインピクチャのような常に手前へ出る窓**は
+AX 上ふつうのウィンドウに見えるため、`kCGWindowLayer`（通常のウィンドウは 0）で除きます。
 
-### 2. アクセシビリティ権限を与える
-
-`build/comet.app` を初回起動するとダイアログが出る。出ない場合は
-システム設定 > プライバシーとセキュリティ > アクセシビリティ で `comet` を有効にする。
-
-権限が外れたときのリセット:
-
-```bash
-tccutil reset Accessibility local.comet
-```
-
-### 3. 必須のシステム設定
-
-画面外退避方式（ワークスペース）はネイティブ Space が1つであることを前提にしている。
-以下が合っていないと配置が崩れる。
-
-| 設定 | 値 | 理由 |
-|---|---|---|
-| Mission Control > ディスプレイごとに個別の操作スペース | **オフ** | ネイティブ Space を1つに保つ |
-| Mission Control > 最新の使用状況に基づいて操作スペースを自動的に並べ替える | **オフ** | 順序が動くと座標系の前提が崩れる |
-| Stage Manager | **オフ** | ウィンドウ配置を横取りする |
-| アクセシビリティ > 視差効果を減らす | **オン推奨** | ウィンドウ移動時の OS アニメーションを抑える |
-
-**緑ボタンのフルスクリーンは使わない。** 独自の Space を作るため画面外退避と衝突する。
-フルスクリーン化されたウィンドウは管理対象から外れる。
-
-### 4. 移行時に消すもの
-
-| 対象 | 理由 |
-|---|---|
-| AeroSpace | ホットキーとウィンドウ配置を奪い合う |
-| `~/.config/aerospace/wallpaper.sh` の呼び出し | 壁紙は comet の `[wallpaper] dir` に移した |
-| （残す）Hammerspoon の「修飾キー + BS でウィンドウを閉じる」 | comet の既定はこのキーを使わないので競合しない。comet 側で `close-window` を割り当てるなら、そのとき外す |
-| Hammerspoon の `modules/app_switcher.lua`（`alt-f` / `alt-d`） | comet の `focus next-app` / `focus next-window-in-app` に移した。**両方動くとキーを奪い合う**ので `init.lua` の `require("modules.app_switcher")` を外す |
-
-Hammerspoon の `app_switcher.lua` / `clipboard.lua` / `search.lua` /
-`command_launcher*.lua` / `snippets*.lua` はそのまま残してよい。
-
-## 開発上の注意
-
-### AeroSpace と同時に動かさない
-
-両方が動くと互いのウィンドウ配置を上書きし合って発振する。
-また `alt-*` 系のホットキーは先に登録した側が勝つ。開発中は AeroSpace を止めること。
+## 開発
 
 ```bash
-osascript -e 'quit app "AeroSpace"'
+swift build                 # ビルド
+./scripts/test.sh           # 単体テスト（576 件）
+./scripts/verify.sh         # 実機検証（実際にウィンドウを動かして画素と座標で判定）
+./scripts/build-app.sh      # .app を組み立てる
 ```
 
-### 二重起動はロックで弾かれる
+> [!NOTE]
+> Xcode を入れていない環境では `swift test` が Foundation の解決に失敗します。
+> `./scripts/test.sh` が必要な設定を渡すので、テストはこちらから実行してください。
 
-`~/Library/Caches/local.comet/comet.lock` を `flock(2)` で保持する。
-2つ目のインスタンスは権限確認より前に停止する。
-
-### メインスレッドで同期 AX 呼び出しをしない
-
-本プロジェクトの最重要の設計制約。AX 呼び出しは対象アプリの都合で
-最大6秒ブロックしうるため、メインスレッドで呼ぶと WM 全体が固まる。
-AX へのアクセスは `CometAccessibility` の `ApplierPool` が返す PID ごとのキュー上でのみ行う。
-詳細は [DESIGN.md §4.2](DESIGN.md)。
-
-## 構成
+`scripts/verify.sh` は実際にウィンドウを開き、合成キー・合成ドラッグを送り、
+画面を撮って画素で判定します（枠線が描かれているか、壁紙が切り替わったか、
+掴んで動かしたウィンドウが戻るか、Mission Control 中に枠線が消えるか、など）。
+`comet-probe` が撮った画面とウィンドウの実座標を読む道具です。
 
 ```
 Sources/
-  CometSupport/         ログ、起動オプション、インスタンスロック
-  CometInput/           ホットキー（Carbon RegisterEventHotKey）
-  CometAccessibility/   AX API へのアクセス層、PID ごとのキュー、権限
-  CometCore/            状態機械とレイアウト（副作用のない計算はここ）
-    State/              BSP ツリー、正規化、ワークスペース、台帳、モニタ、ウィンドウルール
-    Layout/             矩形の算出、座標変換、丸め
-    Commands/           コマンドのパースとツリー操作
-  CometDecoration/      内蔵UI（枠線・インジケータ・壁紙）
-  CometConfig/          設定ファイル（TOML）の読み込み
-  comet/                エントリポイント
-scripts/
-  env.sh             共通ビルド環境（CLT 向けの探索パス補正）
-  test.sh            テスト実行
-  build-app.sh       .app の組み立てと署名
-  make-signing-cert.sh  開発用署名 ID の作成
+  comet/             実行ファイル。起動・配線・ホットキー登録
+  comet-probe/       検証用の観測ツール
+  CometCore/         ツリー、レイアウト、ワークスペース、適用スケジューラ
+  CometAccessibility AX の呼び出しと通知（プロセスごとのキュー）
+  CometConfig/       TOML の読み込みと監視
+  CometInput/        ホットキーと合成イベント
+  CometDecoration/   枠線・インジケータ・壁紙
+  CometSupport/      ログ、起動オプション、多重起動の防止
+  CometProbe/        画素と矩形の判定
 ```
 
-## 権限が外れたときの見分け方
+## 制限
 
-ウィンドウが1枚も並ばないときは、起動時のログに理由が出る。
+- **メインディスプレイだけを制御します。** サブディスプレイのウィンドウは
+  管理対象外で、素の macOS と同じように扱えます
+- 未対応のコマンド: `move-node-to-monitor` / `focus-monitor` /
+  `move-workspace-to-monitor` / `mode`（モーダルなキー層）/ `flatten-workspace-tree`
+- 他のタイリングウィンドウマネージャと同時に動かすと、互いの配置を奪い合います
+- `kill` で終了すると、退避中のウィンドウが画面外に残ります
+  （`ctrl-alt-shift-q` で終了してください）
 
-```
-WRN ウィンドウを1枚も認識できなかった（ID 取得に 5 件失敗: 引数が不正（権限が外れている疑い…
-```
+## ライセンス
 
-ad-hoc 署名の identifier には実行ファイルの内容ハッシュが入るため、
-**再ビルドすると別アプリとして扱われて権限が外れる。**
-`./scripts/make-signing-cert.sh` で固定の署名 ID を作れば維持される。
+[MIT](LICENSE)
+
+## 謝辞
+
+設定とコマンドの綴りは [AeroSpace](https://github.com/nikitabobko/AeroSpace) を参考にしています。

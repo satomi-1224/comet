@@ -12,7 +12,7 @@ public enum TreeOperations {
     /// 方向フォーカスの行き先。木は変えない。
     ///
     /// 自分の親から順に、向きが一致する祖先を探して隣を見る。見つからなければ `nil`。
-    /// 隣接モニタへの移動は Phase 3 以降。
+    /// 隣接モニタへの移動は未対応。
     public static func focusTarget(from node: WindowNode, direction: Direction) -> WindowNode? {
         var current: Node = node
         while let parent = current.parent {
@@ -100,7 +100,7 @@ public enum TreeOperations {
 
     /// 分割の境界を動かして、ウィンドウの寸法を変える。
     ///
-    /// **ウィンドウ単体のサイズを直接変えることはできない**（設計書 §5.0）。
+    /// **ウィンドウ単体のサイズを直接変えることはできない**。
     /// 変えるのは常に境界なので、兄弟が同量を譲り、間隔は設定値どおりに保たれる。
     ///
     /// - Parameters:
@@ -148,7 +148,7 @@ public enum TreeOperations {
     ///
     /// - Important: **必ず「今の比率を反映した境界」を渡すこと。**
     ///   ドラッグ中は同じ辺について通知が何度も届く。適用前の座標を基準にすると
-    ///   同じ量を繰り返し足してしまい、追従が暴走する（Phase 1 で踏んだ失敗）。
+    ///   同じ量を繰り返し足してしまい、追従が暴走する（実機で踏んだ失敗）。
     ///   どの境界かを見分けるのに古いレイアウトを使うのは構わないが、
     ///   移動量を求める基準は ``LayoutEngine/Result/boundary(like:)`` で引き直す。
     ///

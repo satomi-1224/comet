@@ -24,7 +24,7 @@ public enum Orientation: String, Sendable, Equatable, CaseIterable {
     }
 }
 
-/// ルートコンテナの向きの決め方（設計書 §9.2 の `default-orientation`）。
+/// ルートコンテナの向きの決め方。
 public enum DefaultOrientation: String, Sendable, Equatable, CaseIterable {
     /// 領域の縦横比で決める。横長なら左右。
     case auto

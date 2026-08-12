@@ -8,7 +8,7 @@ struct AXPrivateTests {
 
     // これは実装ではなく実行環境に対する検査。
     // OS アップデートで _AXUIElementGetWindow が消えた場合、
-    // このテストが落ちることで即座に気づける（設計書 §12.2 のカナリア）。
+    // このテストが落ちることで即座に気づける。
     @Test("_AXUIElementGetWindow が解決できる")
     func symbolResolves() {
         #expect(
@@ -16,7 +16,7 @@ struct AXPrivateTests {
             """
             _AXUIElementGetWindow を解決できなかった。
             OS アップデートでシンボルが削除された可能性がある。
-            設計書 §12.2 のフォールバック（CGWindowListCopyWindowInfo からの推定）が必要。
+            この非公開シンボル のフォールバック（CGWindowListCopyWindowInfo からの推定）が必要。
             """)
     }
 

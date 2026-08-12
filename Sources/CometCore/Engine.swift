@@ -35,7 +35,7 @@ struct AppInfo: Sendable {
 ///
 /// - Important: **メインスレッドで同期 AX 呼び出しを行わないこと。**
 ///   AX 呼び出しは対象アプリの都合で最大6秒ブロックしうる。ここがブロックすると
-///   ホットキーも通知処理も描画も止まる（設計書 §4.2）。
+///   ホットキーも通知処理も描画も止まる。
 ///   AX に触る処理は全て `applierPool` のキューへ回し、結果は `Task { @MainActor }` で戻す。
 @MainActor
 public final class Engine: WindowResolving {
@@ -68,7 +68,7 @@ public final class Engine: WindowResolving {
     /// ワークスペースの集合。**タイル配置のルートはワークスペースごとに持つ。**
     ///
     /// **レイアウト（分割構造と各分割の比率）が唯一の正**であり、ウィンドウの矩形は
-    /// ここから導出される（設計書 §5.0）。ウィンドウ側の状態は常に上書き対象で、
+    /// ここから導出される。ウィンドウ側の状態は常に上書き対象で、
     /// 追従しなければ補正し、それでも駄目なら制約として学習してレイアウト側が譲る。
     private let workspaces: WorkspaceManager
 
@@ -78,7 +78,7 @@ public final class Engine: WindowResolving {
     /// 初回配置を待たせないウィンドウ。**症状A（デフォルト位置に一瞬出る）の対策。**
     ///
     /// SIP 有効下では他プロセスのウィンドウの初回描画を止められないので、
-    /// 「通知を受けてから適用が終わるまで」を短くするしかない（設計書 §3.2）。
+    /// 「通知を受けてから適用が終わるまで」を短くするしかない。
     private var priorityWindows: Set<CGWindowID> = []
 
     /// 再配置のあとにフォーカスを戻すべきワークスペース。
@@ -108,7 +108,7 @@ public final class Engine: WindowResolving {
     private var focusCounter: UInt64 = 0
 
     public var normalization = NormalizationConfig.default
-    /// 新しいウィンドウの入り方。既定は Phase 1 で実機検証した dwindle。
+    /// 新しいウィンドウの入り方。既定は dwindle。
     public var insertionStrategy = TreeSync.InsertionStrategy.split
     /// ルートの分割方向の決め方。
     public var defaultOrientation = DefaultOrientation.auto
@@ -123,7 +123,7 @@ public final class Engine: WindowResolving {
     /// 非表示ワークスペースのウィンドウがアクティブになったら、そちらへ移るか。
     ///
     /// 画面外退避方式では Cmd+Tab や Dock から非表示のウィンドウを選べてしまい、
-    /// 「アプリは前面だがウィンドウが見えない」状態になる（設計書 §12.6）。
+    /// 「アプリは前面だがウィンドウが見えない」状態になる。
     public var focusFollowsActivation = true
     /// アプリ巡回で「続けて押している」とみなす時間。0 なら毎回組み直す。
     public var focusCycleReset: TimeInterval = 1.5
@@ -135,7 +135,7 @@ public final class Engine: WindowResolving {
     /// フォーカス中のウィンドウが決まったときに呼ばれる。
     ///
     /// **AX の適用完了を待たずに呼ぶ。** 枠線を先に着地させると遅延が視覚的に隠れる
-    ///（設計書 §8.2）。フォーカス先が無いときは `nil`。
+    /// フォーカス先が無いときは `nil`。
     public var onFocusedFrameChanged: (@MainActor (FocusedWindow?) -> Void)?
 
     /// 表示するワークスペースが変わったときに呼ばれる。
@@ -189,7 +189,7 @@ public final class Engine: WindowResolving {
 
     /// 適用のレイテンシをアプリ別に整形した行。`[debug] timing = true` のときだけ中身が入る。
     ///
-    /// **「どのアプリが足を引っ張っているか」がここで分かる**（設計書 §11.3）。
+    /// **「どのアプリが足を引っ張っているか」がここで分かる**。
     public var timingReport: [String] {
         scheduler.timing.report { NSRunningApplication(processIdentifier: $0)?.localizedName }
     }
@@ -242,7 +242,7 @@ public final class Engine: WindowResolving {
             self.log.info("ディスプレイ構成が変わった")
             // 表示中でないワークスペースも寸法が合わなくなる。退避先も動くので、
             // **退避中のウィンドウを新しい退避先へ動かし直さないと画面に現れる**
-            //（設計書 §7.6 手順5）。再配置が全ワークスペース分を積み直す。
+            // 再配置が全ワークスペース分を積み直す。
             self.workspaces.markAllLayoutsDirty()
             self.relayout()
         }
@@ -589,7 +589,7 @@ public final class Engine: WindowResolving {
     /// 非表示ワークスペースのウィンドウがアクティブになったら、そちらへ移る。
     ///
     /// 画面外退避方式では Cmd+Tab や Dock から非表示のウィンドウを選べてしまう。
-    /// 何もしないと「アプリは前面だがウィンドウが見えない」状態になる（設計書 §12.6）。
+    /// 何もしないと「アプリは前面だがウィンドウが見えない」状態になる。
     private func followActivationIfNeeded(_ id: CGWindowID) {
         guard focusFollowsActivation,
             let workspace = registry[id]?.workspace,
@@ -915,7 +915,7 @@ public final class Engine: WindowResolving {
         pendingFocusRestore = incoming.id
         // **ここは `immediately: true` にしない。** 「移動 + 切替」のように1つの
         // バインドで複数コマンドを撃つとき、まとめて1回の再配置にすることで
-        // 中間状態が画面に出ない（設計書 §9.5）。
+        // 中間状態が画面に出ない。
         relayout()
     }
 
@@ -947,7 +947,7 @@ public final class Engine: WindowResolving {
     /// ワークスペースのフォーカスを復元する。
     ///
     /// 離脱時に覚えたウィンドウが残っていればそこへ、無ければ先頭のウィンドウへ。
-    /// どちらも無ければフォーカスは持たない（枠線を消すのは Phase 5）。
+    /// どちらも無ければフォーカスは持たない。
     private func restoreFocus(in workspace: Workspace) {
         let remembered = workspace.lastFocused.flatMap { id -> CGWindowID? in
             guard registry[id]?.workspace == workspace.id else { return nil }
@@ -1598,7 +1598,7 @@ public final class Engine: WindowResolving {
     ///
     /// **毎回すべて積み直す。** 合成器が「変化なし」を落とすので IPC は増えないうえ、
     /// モニタ構成が変わって退避先が動いたときもこれだけで追従する
-    ///（積み直しを怠ると退避中のウィンドウが画面の中に現れる。設計書 §7.6 手順5）。
+    ///（積み直しを怠ると退避中のウィンドウが画面の中に現れる）。
     private func appendStashTargets(
         excluding activeID: WorkspaceID,
         into targets: inout [CGWindowID: TargetFrame],
@@ -1785,7 +1785,7 @@ public final class Engine: WindowResolving {
         registry.update(id) { $0.observedFrame = observed ?? target }
 
         guard let observed else { return }
-        // 目標に届かなかった場合は枠線を実測値へ合わせ直す（設計書 §8.2）。
+        // 目標に届かなかった場合は枠線を実測値へ合わせ直す。
         if id == focusedWindowID,
             !Geometry.isApproximatelyEqual(observed, target, tolerance: 1)
         {

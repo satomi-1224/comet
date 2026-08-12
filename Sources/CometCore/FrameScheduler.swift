@@ -14,7 +14,7 @@ public protocol WindowResolving: AnyObject {
     func didApply(_ id: CGWindowID, target: CGRect, observed: CGRect?, succeeded: Bool)
     /// 補正の上限に達しても目標へ追従しなかった。
     ///
-    /// 「AX でのリサイズを無視するアプリ」を検出できる唯一の合図（設計書 §12.4）。
+    /// 「AX でのリサイズを無視するアプリ」を検出できる唯一の合図。
     func didGiveUp(_ id: CGWindowID, target: CGRect, observed: CGRect)
 }
 

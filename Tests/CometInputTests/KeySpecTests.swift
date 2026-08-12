@@ -154,7 +154,7 @@ struct KeySpecTests {
             "alt-ctrl-h", "alt-ctrl-j", "alt-ctrl-k", "alt-ctrl-l",
             "alt-semicolon", "alt-s", "alt-a", "alt-slash", "alt-shift-f",
             "alt-e", "alt-w",
-            // 設計書で追加予定のもの
+            // 今後追加する予定のもの
             "alt-shift-delete", "alt-tab", "alt-r",
         ])
     func currentConfigBindings(spec: String) throws {

@@ -5,7 +5,7 @@ import Testing
 
 /// アプリ巡回（`focus next-app`）とアプリ内のウィンドウ巡回（`focus next-window-in-app`）。
 ///
-/// Hammerspoon の `Alt+F` / `Alt+D` を comet 側へ移したもの（設計書 §12.3）。
+/// Hammerspoon の `Alt+F` / `Alt+D` を comet 側へ移したもの。
 /// 二重にウィンドウ一覧を持たなくなる。
 ///
 /// **要点は「押し続けている間は並びを組み直さない」こと。** フォーカスすると

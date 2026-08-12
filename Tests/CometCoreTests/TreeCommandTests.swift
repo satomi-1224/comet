@@ -272,7 +272,7 @@ struct TreeCommandTests {
     }
 
     // ドラッグ中は同じ辺について通知が何度も届く。基準が古いままだと同じ量を
-    // 何度も足してしまい、追従が暴走する（Phase 1 で踏んだ失敗）。
+    // 何度も足してしまい、追従が暴走する（実機で踏んだ失敗）。
     @Test("今の比率を基準にすれば同じ観測値を二度反映しても動かない")
     func repeatedBoundaryMoveIsIdempotent() throws {
         let root = h(w(1), w(2))
@@ -470,7 +470,7 @@ struct TreeCommandTests {
         }
     }
 
-    // Phase 3 以降のコマンドは「知っているが未対応」と伝える。設定に書いてあるのに
+    // 未対応のコマンドは「知っているが未対応」と伝える。設定に書いてあるのに
     // 黙って無視されると、キーが効かない原因が設定側か実装側か分からない。
     @Test("引数を取らないコマンドを解釈する")
     func parseArgumentlessCommands() throws {

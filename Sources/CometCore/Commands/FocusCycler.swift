@@ -18,7 +18,7 @@ public enum FocusCycleTarget: String, Sendable, Equatable, CaseIterable {
 
 /// アプリ巡回とアプリ内のウィンドウ巡回。**純粋な計算だけ。**
 ///
-/// Hammerspoon の `Alt+F` / `Alt+D` を comet 側へ移したもの（設計書 §12.3）。
+/// Hammerspoon の `Alt+F` / `Alt+D` を comet 側へ移したもの。
 /// WM が既に持っているウィンドウ一覧を使うので、二重管理が無くなる。
 public enum FocusCycler {
 

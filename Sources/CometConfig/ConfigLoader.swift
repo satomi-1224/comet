@@ -279,7 +279,7 @@ public enum ConfigLoader {
     ) -> [Binding] {
         guard let modes else { return [] }
 
-        // main 以外のモード（リサイズモード等）は Phase 5 以降。黙って落とさない。
+        // main 以外のモード（リサイズモード等）は未対応。黙って落とさない。
         for name in modes.keys.sorted() where name != "main" {
             problems.append(
                 Problem(kind: .unsupportedMode, detail: "[mode.\(name)] はまだ未対応なので読み飛ばした"))
