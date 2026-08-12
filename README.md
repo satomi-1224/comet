@@ -103,7 +103,8 @@ screencapture -x /tmp/screen.png
 
 ```bash
 # 全面が絵柄の画像から、範囲を指定して角を丸める（今のアイコンはこれ）
-./scripts/make-icon.sh ~/Desktop/image.png --crop 1600,0,1200,1200 --corner-radius 22
+./scripts/make-icon.sh ~/Desktop/image.png \
+  --crop 1600,0,1200,1200 --corner-radius 22 --margin 8
 
 # 余白と影が付いた画像から、背景を抜いて図形へ切り詰める
 ./scripts/make-icon.sh ~/Desktop/icon.png --tolerance 100
@@ -115,7 +116,10 @@ screencapture -x /tmp/screen.png
   暗い部分（夜空など）まで抜けて穴が空くため
 - `--tolerance` は背景とみなす色の幅。**色だけで一律に抜くのではなく外周から繋がった
   部分だけを抜く**ので、大きくしても図形の中の明るい部分（グロウ）は消えない
-- `--corner-radius` は一辺に対する割合。macOS のアイコンは 22 前後
+- `--corner-radius` は**絵柄の一辺**に対する割合。macOS のアイコンは 22 前後
+- `--margin` は canvas に対する余白の割合。**入れないと他のアプリより2割大きく見える。**
+  macOS 純正は 8〜9（実測: 電卓は 1024 の canvas に絵柄 850 = 占有率 83%。
+  今の comet は 84%）
 
 ### コマンド
 

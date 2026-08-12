@@ -55,12 +55,15 @@ let usage = """
           → 書き出したパス
 
       icon <入力png> <出力png> [--tolerance n] [--size n]
-            [--crop x,y,w,h] [--corner-radius 割合]
+            [--crop x,y,w,h] [--corner-radius 割合] [--margin 割合]
           アプリのアイコン用に切り出す。**外周から繋がった背景を透明にし**、
           残った部分の正方形へ切り詰めて伸縮する（既定 1024）。
           --crop を渡すとその範囲を使い、背景の除去は行わない
           （全面が絵柄で余白が無い画像はこちら）。
-          --corner-radius は出力の一辺に対する割合（macOS 風は 22）。
+          --corner-radius は**絵柄の一辺**に対する割合（macOS 風は 22）。
+          --margin は出力の一辺に対する余白の割合。**macOS 純正は 8〜9**
+          （実測: 電卓は 1024 の canvas に 850 の絵柄 = 占有率 83%）。
+          0 のままだと他のアプリより2割大きく見える。
           → 書き出したパス と 切り出した範囲
 
       solid <png> <幅x高さ> <#rrggbb>
@@ -442,18 +445,26 @@ case "icon":
             space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
     else { fail("切り出せない") }
     output.interpolationQuality = .high
+
+    // **余白。** macOS 純正のアイコンは canvas いっぱいには描かない
+    // （実測: 電卓は 1024 に対して絵柄 850 = 占有率 83%）。余白を入れないと
+    // Dock や Finder で他のアプリより2割ほど大きく見える。
+    let marginPercent = arguments.int("margin", default: 0)
+    let inset = CGFloat(side) * CGFloat(min(marginPercent, 40)) / 100
+    let shape = CGRect(
+        x: inset, y: inset, width: CGFloat(side) - inset * 2, height: CGFloat(side) - inset * 2)
+
     // 角丸。**クリップしてから描くので角は反エイリアスされて透明になる。**
-    // macOS のアイコンは一辺の 22% 前後で丸めてある。
+    // 半径は絵柄の一辺に対する割合（macOS のアイコンは 22% 前後）。
     let radiusPercent = arguments.int("corner-radius", default: 0)
     if radiusPercent > 0 {
-        let radius = CGFloat(side) * CGFloat(min(radiusPercent, 50)) / 100
+        let radius = shape.width * CGFloat(min(radiusPercent, 50)) / 100
         output.addPath(
             CGPath(
-                roundedRect: CGRect(x: 0, y: 0, width: side, height: side),
-                cornerWidth: radius, cornerHeight: radius, transform: nil))
+                roundedRect: shape, cornerWidth: radius, cornerHeight: radius, transform: nil))
         output.clip()
     }
-    output.draw(cropped, in: CGRect(x: 0, y: 0, width: side, height: side))
+    output.draw(cropped, in: shape)
     guard let scaled = output.makeImage(),
         let destination = CGImageDestinationCreateWithURL(
             URL(fileURLWithPath: arguments.positionals[1]) as CFURL, "public.png" as CFString, 1,
