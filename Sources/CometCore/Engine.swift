@@ -132,11 +132,11 @@ public final class Engine: WindowResolving {
     /// 押し続けている間の巡回の状態。
     private var focusCycleSession = FocusCycler.Session()
 
-    /// フォーカス中のウィンドウの矩形（AX 座標）が決まったときに呼ばれる。
+    /// フォーカス中のウィンドウが決まったときに呼ばれる。
     ///
     /// **AX の適用完了を待たずに呼ぶ。** 枠線を先に着地させると遅延が視覚的に隠れる
     ///（設計書 §8.2）。フォーカス先が無いときは `nil`。
-    public var onFocusedFrameChanged: (@MainActor (CGRect?) -> Void)?
+    public var onFocusedFrameChanged: (@MainActor (FocusedWindow?) -> Void)?
 
     /// 表示するワークスペースが変わったときに呼ばれる。
     ///
@@ -480,6 +480,10 @@ public final class Engine: WindowResolving {
     ) {
         guard !windows.isEmpty else { return }
 
+        // 階層は AX からは分からないので別に取る。**まとめて1回だけ**（1枚ずつ引くと
+        // 往復が増えるうえ、実測でも一覧を取るほうが速い）。
+        let layers = WindowLayers.snapshot()
+
         for window in windows {
             let disposition = resolveDisposition(
                 WindowClassifier.classify(
@@ -488,7 +492,8 @@ public final class Engine: WindowResolving {
                         subrole: window.attributes.subrole,
                         isFullScreen: window.attributes.isFullScreen,
                         isMinimized: window.attributes.isMinimized,
-                        size: window.attributes.size ?? .zero)),
+                        size: window.attributes.size ?? .zero,
+                        layer: layers?[window.id])),
                 id: window.id, bundleID: bundleID, title: window.attributes.title,
                 frame: window.attributes.frame)
 
@@ -615,19 +620,34 @@ public final class Engine: WindowResolving {
     ///
     /// 目標矩形が分かっていればそれを使う（適用の完了を待たない）。
     /// 分からないもの（フローティングなど）は実測値に合わせる。
-    private func notifyFocusedFrame() {
+    /// - Parameter measured: 目標に届かなかったときの実測値。
+    ///   **対象が一致するときだけ使う。** 別のウィンドウの実測値を混ぜると枠線が飛ぶ。
+    private func notifyFocusedFrame(measured: (id: CGWindowID, frame: CGRect)? = nil) {
         guard let handler = onFocusedFrameChanged else { return }
-        guard let id = focusedWindowOnActiveWorkspace() else {
+        guard let id = focusedWindowOnActiveWorkspace(), let record = registry[id] else {
             handler(nil)
             return
         }
-        // サブディスプレイのウィンドウには枠線を描かない。あちらは素の macOS のまま
-        // 使えるようにしている場所なので、WM の装飾を持ち込まない。
-        guard registry[id]?.disposition.isOnOtherMonitor != true else {
+        // 見えていないものは囲まない。ネイティブ全画面と最小化は macOS 側が描画を
+        // 持っていくし、サブディスプレイは素の macOS のまま使えるようにしている場所で、
+        // どちらも WM の装飾を持ち込む先ではない。
+        guard record.disposition.showsFocusBorder else {
             handler(nil)
             return
         }
-        handler(desiredFrames[id] ?? registry[id]?.observedFrame)
+        let override = measured?.id == id ? measured?.frame : nil
+        guard let frame = override ?? desiredFrames[id] ?? record.observedFrame else {
+            handler(nil)
+            return
+        }
+        // 非表示ワークスペースへ退避したウィンドウ（画面の外）には描かない。
+        // **モニタが分からないときは描く。** 起動直後に枠線が出ないほうが困る。
+        guard monitors.monitors.isEmpty || MonitorManager.owner(of: frame, among: monitors.monitors) != nil
+        else {
+            handler(nil)
+            return
+        }
+        handler(FocusedWindow(id: id, frame: frame))
     }
 
     /// コマンドの対象になるウィンドウノード。
@@ -1034,7 +1054,8 @@ public final class Engine: WindowResolving {
                             subrole: attributes.subrole,
                             isFullScreen: attributes.isFullScreen,
                             isMinimized: attributes.isMinimized,
-                            size: attributes.size ?? .zero)),
+                            size: attributes.size ?? .zero,
+                            layer: WindowLayers.layer(of: id))),
                     id: id, bundleID: record.bundleID, title: attributes.title, frame: frame)
                 self.registry.update(id) { $0.disposition = disposition }
                 self.relayout()
@@ -1067,9 +1088,13 @@ public final class Engine: WindowResolving {
             return
         }
 
-        // サブディスプレイへ出したウィンドウがメインへ戻ってきたかを見る。
-        // 位置が変わったときだけ見れば足りるので、ここで拾う。
-        if record.disposition.isOnOtherMonitor {
+        // 一時的な理由で外しているものは、動いたなら状態が変わったかもしれないので
+        // 読み直す。サブディスプレイからメインへ戻った、ネイティブ全画面をやめた、など。
+        //
+        // **全画面の解除では要素が作り直されないことがある**（Chrome は同じウィンドウの
+        // まま戻る。実測）。作り直しの通知を当てにすると、解除しても管理へ戻らず
+        // ウィンドウが重なったまま残る。位置か寸法が変わったここで拾う。
+        if case .unmanaged(let reason) = record.disposition, reason.isTransient {
             guard allowExternalReaction(id) else { return }
             refreshWindow(element, pid: pid)
             return
@@ -1693,7 +1718,7 @@ public final class Engine: WindowResolving {
         if id == focusedWindowID,
             !Geometry.isApproximatelyEqual(observed, target, tolerance: 1)
         {
-            onFocusedFrameChanged?(observed)
+            notifyFocusedFrame(measured: (id: id, frame: observed))
         }
         learnMinimum(id, target: target, observed: observed)
     }
@@ -1710,6 +1735,48 @@ public final class Engine: WindowResolving {
             return
         }
 
+        // **ネイティブ全画面を「AX を無視するアプリ」と取り違えない。**
+        //
+        // 全画面へ入ると AX の要素が作り直され、**作られた直後の `AXFullScreen` はまだ
+        // `false` を返す**（実測）。その値のままタイル対象として目標を当て続けると当然
+        // 追従せず、ここへ落ちてフローティングへ降格してしまう。降格は恒久的なので、
+        // 全画面をやめてもそのアプリだけ並ばなくなる（実際に Chrome で起きた）。
+        //
+        // 形では見分けられない。Chrome の全画面ウィンドウは画面全体ではなく
+        // 自前のタブ帯を除いた (0,138) 2560x1526 になる（実測）。落ち着いたあとに
+        // 属性を読み直せば `true` が返る（実測）ので、降格の前にそれだけ確かめる。
+        // ここは3回の補正に失敗したあとの稀な経路なので、1往復増やしてよい。
+        guard let element = elements[id], let pid = registry[id]?.pid else {
+            demoteToFloating(id, target: target, observed: observed)
+            return
+        }
+        applierPool.queue(for: pid).async {
+            let isFullScreen = AXBridge.readWindowAttributes(element.raw)?.isFullScreen ?? false
+            Task { @MainActor in
+                // 待っている間に状態が変わっていることがある。
+                guard self.registry[id]?.disposition.isTiled == true else { return }
+                guard isFullScreen else {
+                    self.demoteToFloating(id, target: target, observed: observed)
+                    return
+                }
+                self.log.info("[\(id)] はネイティブ全画面だったので管理から外す")
+                self.registry.update(id) {
+                    $0.disposition = .unmanaged(.fullScreen)
+                    $0.observedFrame = observed
+                }
+                self.desiredFrames.removeValue(forKey: id)
+                self.scheduler.forget(id)
+                // **全画面中の寸法を「このアプリの下限」として覚えてはいけない。**
+                // 覚えると全画面をやめたあとも画面幅を要求し続け、他のウィンドウが
+                // 「領域が足りず配置できなかった」となって重なる（実際にそうなった）。
+                self.minimumSizes.removeValue(forKey: id)
+                self.relayout()
+            }
+        }
+    }
+
+    /// 指定した寸法を無視するアプリをツリーから外す。
+    private func demoteToFloating(_ id: CGWindowID, target: CGRect, observed: CGRect) {
         let record = registry[id]
         registry.update(id) { $0.disposition = .floating }
         desiredFrames.removeValue(forKey: id)

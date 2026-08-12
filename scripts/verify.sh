@@ -304,6 +304,16 @@ border_coverage() {
     --inset $(((BORDER_RADIUS + 4) * CAPTURE_SCALE)) --tolerance 24 2>/dev/null
 }
 
+# 枠線のウィンドウそのもの（無ければ空）。
+#
+# **画素で見てはいけない。** 枠線の色と壁紙やアプリの UI が近いと切り分けられない
+# （既定の #7aa2f7 は青い壁紙とも Discord の UI とも一致し、Mission Control 中でも
+# 「四辺が 93〜100% 一致」と出て判定にならなかった）。枠線は自プロセスのウィンドウ
+# なので、画面のウィンドウ一覧に出ているかどうかで見るほうが確実。
+border_window() {
+  "$PROBE" windows --any-layer | grep "owner=comet" | head -1 || true
+}
+
 # 画面の一部がその色でどれだけ埋まっているか（百分率）。壁紙の判定に使う。
 #
 # **画面中央は見ない。** HUD が中央 120x120 に出るので、200x200 を中央に取ると
@@ -1121,10 +1131,94 @@ else
   stop_comet
 fi
 
-# ---- 16. 常駐コスト（--long のときだけ） ----------------------------------
+# ---- 16. 見えていないときは枠線を出さない ---------------------------------
+# **Mission Control・ネイティブ全画面・Cmd+H で枠線が残る**という報告への確認。
+#
+# いずれも AX 上のウィンドウは生きたまま同じ矩形を返す。しかも見分け方が2通り要る:
+# Cmd+H や別 Space では対象が画面のウィンドウ一覧から消えるが、
+# **Mission Control では消えない**（縮小されて並ぶだけ。代わりに Dock が画面全体を
+# 覆う窓を出す）。片方だけの判定では取り逃がすことを実測で確かめている。
+echo "==> 16. 見えていないときに枠線を消すか"
+start_comet "$WORK/16.log" trace
+
+BEFORE="$(border_window)"
+if [ -z "$BEFORE" ]; then
+  skip "枠線が出ていないので、消えるかどうかは判定できない"
+else
+  ok "対照: 普通に見えているときは枠線が出ている"
+
+  # (a) Mission Control。ウィンドウは一覧に残るので、Dock の覆いで判断している。
+  open -a "Mission Control" >/dev/null 2>&1
+  sleep 2.5
+  DURING="$(border_window)"
+  osascript -e 'tell application "System Events" to key code 53' >/dev/null 2>&1
+  sleep 2.5
+  if [ -z "$DURING" ]; then
+    ok "Mission Control 中は枠線が引っ込む"
+  else
+    ng "Mission Control 中に枠線が残った（${DURING}）"
+  fi
+  # **消えたまま戻らないほうが困る**ので、戻ることまでを1組で見る。
+  if [ -n "$(border_window)" ]; then
+    ok "Mission Control を閉じると枠線が戻る"
+  else
+    ng "Mission Control を閉じても枠線が戻らない"
+  fi
+
+  # (b) Cmd+H。隠したウィンドウの位置に線が残らないこと。
+  #
+  # **「枠線が消える」ことは求めない。** 隠すと macOS が別のアプリを前面にするので、
+  # 見えている別のウィンドウへ枠線が移るのが正しい（実測でもそうなる）。
+  activate_test_windows
+  sleep 1
+  HIDDEN_AT="$(border_window)"
+  osascript -e 'tell application "System Events" to keystroke "h" using command down' \
+    >/dev/null 2>&1
+  sleep 2.5
+  if [ "$(border_window)" = "$HIDDEN_AT" ]; then
+    ng "Cmd+H で隠したウィンドウに枠線が残った（${HIDDEN_AT}）"
+  else
+    ok "Cmd+H で隠したウィンドウには枠線が残らない"
+  fi
+  activate_test_windows
+  sleep 2
+
+  # (c) ネイティブフルスクリーン。専用の操作スペースが画面を占める。
+  activate_test_windows
+  osascript -e 'tell application "System Events" to keystroke "f" using {control down, command down}' \
+    >/dev/null 2>&1
+  sleep 5
+  # 採用時に気づけた場合は理由の説明（ネイティブフルスクリーン）、
+  # 追従しないことで気づいた場合は専用のログが出る。どちらでも良い。
+  if grep -qE "ネイティブ全画面|ネイティブフルスクリーン" "$WORK/16.log"; then
+    if [ -z "$(border_window)" ]; then
+      ok "ネイティブ全画面中は枠線が引っ込む"
+    else
+      ng "ネイティブ全画面中に枠線が残った（$(border_window)）"
+    fi
+  else
+    skip "ネイティブフルスクリーンにできなかった（キー送出が届いていない）"
+  fi
+  # 元へ戻す。戻せないと後片付けで書類を閉じられない。
+  osascript -e 'tell application "System Events" to keystroke "f" using {control down, command down}' \
+    >/dev/null 2>&1
+  sleep 5
+  activate_test_windows
+
+  # 全画面をやめたら管理へ戻ること。**戻らないとウィンドウが重なったまま残る。**
+  # （全画面の解除では AX 要素が作り直されないアプリがあり、実際に取りこぼしていた）
+  if [ -n "$(border_window)" ]; then
+    ok "全画面をやめると枠線が戻る"
+  else
+    ng "全画面をやめても枠線が戻らない"
+  fi
+fi
+stop_comet
+
+# ---- 17. 常駐コスト（--long のときだけ） ----------------------------------
 # 10分の放置は普段の実行に入れると長すぎるので、明示したときだけ回す。
 if [ "$LONG" = "1" ]; then
-  echo "==> 16. 常駐コスト（10分の放置）"
+  echo "==> 17. 常駐コスト（10分の放置）"
   start_comet "$WORK/13.log" info
   COMET_PID="$(cat "$WORK/pid")"
   RSS_START="$(ps -o rss= -p "$COMET_PID" | tr -d ' ' || echo 0)"

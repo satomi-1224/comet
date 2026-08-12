@@ -291,8 +291,8 @@ decoration.loadWallpapers(
 
 // 内蔵UI は dry-run でも動かす。**他のアプリのウィンドウには一切触らない**ので安全で、
 // 「枠線が目標位置を指す」ことがそのまま配置計算の目視確認になる。
-engine.onFocusedFrameChanged = { [weak decoration] rect in
-    decoration?.focusedFrameChanged(to: rect)
+engine.onFocusedFrameChanged = { [weak decoration] focused in
+    decoration?.focusedFrameChanged(to: focused)
 }
 engine.onWorkspaceChanged = { [weak decoration] workspace in
     decoration?.workspaceChanged(to: workspace)

@@ -44,16 +44,16 @@ public final class DecorationController {
             paths, directory: directory, workspaceCount: workspaceCount ?? self.workspaceCount)
     }
 
-    /// フォーカス中のウィンドウの矩形（AX 座標）が決まった。
+    /// フォーカス中のウィンドウが決まった。
     ///
     /// **AX の適用完了を待たずに呼ばれる。** 枠線が先に着地することで遅延が視覚的に隠れる。
-    public func focusedFrameChanged(to rect: CGRect?) {
-        guard let rect else {
+    public func focusedFrameChanged(to focused: FocusedWindow?) {
+        guard let focused else {
             // フォーカス先が無い状態を「枠線が消える」ことで明示する。
             border.hide()
             return
         }
-        border.show(around: rect)
+        border.show(around: focused.frame, windowID: focused.id)
     }
 
     /// 表示するワークスペースが変わった。

@@ -27,19 +27,26 @@ public struct WindowSnapshot: Equatable, Sendable {
     public var isFullScreen: Bool
     public var isMinimized: Bool
     public var size: CGSize
+    /// 重なりの階層（``WindowLayers``）。**分からないときは `nil`**。
+    ///
+    /// AX には無い情報で、ピクチャーインピクチャのような「常に手前へ出る窓」を
+    /// 見分ける唯一の手がかりになる。
+    public var layer: Int?
 
     public init(
         role: String?,
         subrole: String?,
         isFullScreen: Bool = false,
         isMinimized: Bool = false,
-        size: CGSize
+        size: CGSize,
+        layer: Int? = nil
     ) {
         self.role = role
         self.subrole = subrole
         self.isFullScreen = isFullScreen
         self.isMinimized = isMinimized
         self.size = size
+        self.layer = layer
     }
 }
 
@@ -48,6 +55,10 @@ public enum UnmanagedReason: String, Equatable, Sendable, CaseIterable, CustomSt
     case unknownRole
     case notAWindow
     case nonStandardSubrole
+    /// 常に手前へ出る窓（ピクチャーインピクチャ、常時最前面のパネル）。
+    ///
+    /// **AX 上はふつうのウィンドウに見える。** 見分けは `kCGWindowLayer` でしか付かない。
+    case alwaysOnTop
     case fullScreen
     case minimized
     case tooSmall
@@ -64,7 +75,9 @@ public enum UnmanagedReason: String, Equatable, Sendable, CaseIterable, CustomSt
         switch self {
         // サブディスプレイ上は一時的な理由。メインへ戻したら再評価してタイルへ戻す。
         case .fullScreen, .minimized, .tooSmall, .otherMonitor: true
-        case .unknownRole, .notAWindow, .nonStandardSubrole: false
+        // 階層は窓の素性であって状態ではない。ピクチャーインピクチャが
+        // 普通のウィンドウに変わることはない。
+        case .unknownRole, .notAWindow, .nonStandardSubrole, .alwaysOnTop: false
         }
     }
 
@@ -73,6 +86,7 @@ public enum UnmanagedReason: String, Equatable, Sendable, CaseIterable, CustomSt
         case .unknownRole: "role を取得できない"
         case .notAWindow: "role が AXWindow ではない"
         case .nonStandardSubrole: "subrole が AXStandardWindow ではない"
+        case .alwaysOnTop: "常に手前へ出る窓（ピクチャーインピクチャなど）"
         case .fullScreen: "ネイティブフルスクリーン"
         case .minimized: "最小化されている"
         case .tooSmall: "小さすぎる"
@@ -103,6 +117,13 @@ public enum WindowDisposition: Equatable, Sendable {
     ///
     /// サブディスプレイのウィンドウは実在のアプリのウィンドウなので追う。
     public var acceptsFocusTracking: Bool { isTiled || isFloating || isOnOtherMonitor }
+
+    /// 枠線を描いてよい状態か。
+    ///
+    /// **``acceptsFocusTracking`` とは別。** サブディスプレイのウィンドウは
+    /// フォーカスは追うが枠線は描かない（あちらは素の macOS のまま使う場所）。
+    /// ネイティブ全画面と最小化も、macOS 側が見た目を持っていくので描かない。
+    public var showsFocusBorder: Bool { isTiled || isFloating }
 }
 
 /// どのウィンドウをタイル管理下に置くかの判定。
@@ -133,6 +154,16 @@ public enum WindowClassifier {
         // 誤ってダイアログを掴むより落とす方が害が小さい。
         guard snapshot.subrole == AXSubrole.standardWindow else {
             return .unmanaged(.nonStandardSubrole)
+        }
+        // **ピクチャーインピクチャはここで落ちる。** AX 上はふつうの
+        // `AXStandardWindow` として見えるので、階層でしか見分けられない
+        //（実測: 通常のウィンドウは 0、ピクチャーインピクチャは 3）。
+        // 常に手前へ出る窓は並べる対象ではなく、フォーカスの巡回先でもない。
+        //
+        // **分からない（`nil`）ときは管理する。** 取得に失敗しただけで
+        // 全ウィンドウが管理外になるほうが害が大きい。
+        if let layer = snapshot.layer, layer != WindowLayers.normal {
+            return .unmanaged(.alwaysOnTop)
         }
         // ネイティブフルスクリーンは独自の Space を作るため、
         // 画面外退避方式のワークスペースと根本的に衝突する。

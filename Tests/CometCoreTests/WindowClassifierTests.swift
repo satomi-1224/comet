@@ -176,4 +176,64 @@ struct WindowClassifierTests {
         #expect(!WindowDisposition.unmanaged(.minimized).acceptsFocusTracking)
         #expect(!WindowDisposition.unmanaged(.fullScreen).acceptsFocusTracking)
     }
+
+    // MARK: - 常に手前へ出る窓
+
+    /// **YouTube などのピクチャーインピクチャが並べる対象に入っていた**ことで見つかった。
+    ///
+    /// AX 上はふつうのウィンドウとして見える（実測: `role=AXWindow`
+    /// `subrole=AXStandardWindow` `title="ピクチャー イン ピクチャー"` 571x321）。
+    /// role でも subrole でも大きさでも落とせない。`kCGWindowLayer` が
+    /// 通常のウィンドウ 0 に対して 3 であることだけが手がかりになる。
+    @Test("常に手前へ出る窓は並べる対象にしない")
+    func alwaysOnTopWindowIsUnmanaged() {
+        let pictureInPicture = WindowSnapshot(
+            role: AXRole.window, subrole: AXSubrole.standardWindow,
+            size: CGSize(width: 571, height: 321), layer: 3)
+        #expect(WindowClassifier.classify(pictureInPicture) == .unmanaged(.alwaysOnTop))
+        // フォーカスの巡回先にも枠線の対象にもしない。
+        #expect(!WindowDisposition.unmanaged(.alwaysOnTop).acceptsFocusTracking)
+        #expect(!WindowDisposition.unmanaged(.alwaysOnTop).showsFocusBorder)
+        // 階層は状態ではなく素性なので、通知を待って評価し直す必要がない。
+        #expect(!UnmanagedReason.alwaysOnTop.isTransient)
+    }
+
+    @Test("通常の階層のウィンドウはこれまでどおり並べる")
+    func normalLayerStaysTiled() {
+        let normal = WindowSnapshot(
+            role: AXRole.window, subrole: AXSubrole.standardWindow,
+            size: CGSize(width: 800, height: 600), layer: 0)
+        #expect(WindowClassifier.classify(normal) == .tiled)
+    }
+
+    /// **取得に失敗しただけで全ウィンドウが管理外になってはいけない。**
+    @Test("階層が分からないときは管理する")
+    func unknownLayerStaysTiled() {
+        let unknown = WindowSnapshot(
+            role: AXRole.window, subrole: AXSubrole.standardWindow,
+            size: CGSize(width: 800, height: 600), layer: nil)
+        #expect(WindowClassifier.classify(unknown) == .tiled)
+    }
+
+    // MARK: - 枠線を描く対象か
+
+    /// **ネイティブ全画面や最小化のあとも枠線が残った**ことで見つかった。
+    ///
+    /// フォーカスを追うかどうかとは別の判断になる。サブディスプレイのウィンドウは
+    /// 追うが描かない（素の macOS のまま使う場所）。全画面・最小化は macOS 側が
+    /// 見た目を持っていくので、こちらが枠を重ねると見えないものを囲むことになる。
+    @Test("見えていないウィンドウには枠線を描かない")
+    func borderOnlyForVisibleWindows() {
+        #expect(WindowDisposition.tiled.showsFocusBorder)
+        #expect(WindowDisposition.floating.showsFocusBorder)
+        // 追跡はするが描かない、が両立する唯一の状態。
+        #expect(WindowDisposition.unmanaged(.otherMonitor).acceptsFocusTracking)
+        #expect(!WindowDisposition.unmanaged(.otherMonitor).showsFocusBorder)
+        #expect(!WindowDisposition.unmanaged(.fullScreen).showsFocusBorder)
+        #expect(!WindowDisposition.unmanaged(.minimized).showsFocusBorder)
+        #expect(!WindowDisposition.unmanaged(.tooSmall).showsFocusBorder)
+        #expect(!WindowDisposition.unmanaged(.nonStandardSubrole).showsFocusBorder)
+        #expect(!WindowDisposition.unmanaged(.notAWindow).showsFocusBorder)
+        #expect(!WindowDisposition.unmanaged(.unknownRole).showsFocusBorder)
+    }
 }
