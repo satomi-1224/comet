@@ -254,9 +254,12 @@ public final class Engine: WindowResolving {
 
         observeApplicationLifecycle()
         adoptRunningApplications()
+        startLayoutGuard()
     }
 
     public func stop() {
+        layoutGuardTimer?.invalidate()
+        layoutGuardTimer = nil
         observerHub.stop()
         registry.removeAll()
         elements.removeAll()
@@ -482,7 +485,7 @@ public final class Engine: WindowResolving {
 
         // 階層は AX からは分からないので別に取る。**まとめて1回だけ**（1枚ずつ引くと
         // 往復が増えるうえ、実測でも一覧を取るほうが速い）。
-        let layers = WindowLayers.snapshot()
+        let screen = ScreenWindows.snapshot()
 
         for window in windows {
             let disposition = resolveDisposition(
@@ -493,7 +496,7 @@ public final class Engine: WindowResolving {
                         isFullScreen: window.attributes.isFullScreen,
                         isMinimized: window.attributes.isMinimized,
                         size: window.attributes.size ?? .zero,
-                        layer: layers?[window.id])),
+                        layer: screen?[window.id]?.layer)),
                 id: window.id, bundleID: bundleID, title: window.attributes.title,
                 frame: window.attributes.frame)
 
@@ -1055,7 +1058,7 @@ public final class Engine: WindowResolving {
                             isFullScreen: attributes.isFullScreen,
                             isMinimized: attributes.isMinimized,
                             size: attributes.size ?? .zero,
-                            layer: WindowLayers.layer(of: id))),
+                            layer: ScreenWindows.layer(of: id))),
                     id: id, bundleID: record.bundleID, title: attributes.title, frame: frame)
                 self.registry.update(id) { $0.disposition = disposition }
                 self.relayout()
@@ -1241,6 +1244,74 @@ public final class Engine: WindowResolving {
         guard Date().timeIntervalSince(dragging.at) < Self.dragGrace else { return nil }
         return dragging.id
     }
+
+    // MARK: - レイアウトの見張り
+
+    /// 目標と実際がずれていないかを定期的に確かめ、ずれていたら戻す。
+    ///
+    /// **通知だけでは足りない。** ドラッグの最後にこちらが戻しても、離した拍子に
+    /// 掴んだ先へ書き直されることがある（実測: 戻した直後の読み戻しでは目標に
+    /// 一致していたのに、数百 ms 後には掴んだ先に居た）。その後は通知が来ないので、
+    /// 通知に頼るだけだと崩れたまま残る。**利用者から見れば「戻ってこない」。**
+    ///
+    /// `CGWindowList` なら全ウィンドウの矩形が1回 約0.3ms で取れる。AX の往復は
+    /// 要らないので、ハングしたアプリが混ざっていても止まらない。
+    private func startLayoutGuard() {
+        guard layoutGuardTimer == nil, !isDryRun else { return }
+        let timer = Timer.scheduledTimer(
+            withTimeInterval: Self.layoutGuardInterval, repeats: true
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.enforceLayout() }
+        }
+        timer.tolerance = Self.layoutGuardInterval / 2
+        layoutGuardTimer = timer
+    }
+
+    private func enforceLayout() {
+        guard !desiredFrames.isEmpty else { return }
+        // **操作中は手を出さない。** 掴んでいる間に押し返すと引っ張り合いになる。
+        // 離した直後（dragGrace の間）も待つ。戻すのはそのあと一度で足りる。
+        guard currentDraggingWindow() == nil, !isUserDragging() else { return }
+        guard let screen = ScreenWindows.snapshot() else { return }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        for (id, desired) in desiredFrames {
+            guard let record = registry[id], record.disposition.isTiled,
+                record.workspace == workspaces.activeID,
+                let actual = screen[id]?.bounds
+            else { continue }
+            // 自分の適用による動きの最中は見ない。補正は scheduler の担当。
+            guard !scheduler.isSettling(id) else { continue }
+            guard LayoutGuard.isOff(actual, from: desired) else {
+                layoutGuard.settled(id)
+                continue
+            }
+            switch layoutGuard.decide(id, now: now) {
+            case .restore:
+                log.debug(
+                    "[\(id)] が目標からずれている。戻す"
+                        + "（目標 \(Geometry.rendered(desired)) / 実際 \(Geometry.rendered(actual))）")
+                // 実測を控えてから戻す。控えないと、次の適用で「動いていない」と
+                // 誤判定して補正が効かなくなる。
+                registry.update(id) { $0.observedFrame = actual }
+                scheduler.reapply(id, TargetFrame(rect: desired))
+            case .giveUp:
+                log.warn(
+                    "[\(id)] を戻しても目標に落ち着かないので \(Int(LayoutGuard.backoff)) 秒ほど様子を見る"
+                        + "（目標 \(Geometry.rendered(desired)) / 実際 \(Geometry.rendered(actual))）")
+            case .wait:
+                break
+            }
+        }
+    }
+
+    /// 見張りの間隔。
+    ///
+    /// 1回 約0.3ms なので、この間隔でも常駐コストはほぼ増えない。
+    /// 短くするほど戻りが速く見えるが、アプリ側の遅い追従と押し合いやすくなる。
+    private static let layoutGuardInterval: TimeInterval = 0.5
+    private var layoutGuardTimer: Timer?
+    private var layoutGuard = LayoutGuard()
 
     /// 利用者がマウスでドラッグしている最中か。
     ///

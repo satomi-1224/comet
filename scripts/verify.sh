@@ -534,6 +534,40 @@ else
   expect_log "$WORK/4.log" "リサイズを分割の比率へ反映" "ドラッグを境界の移動として解釈した"
   expect_no_log "$WORK/4.log" "レイアウトへ戻す" "移動と誤認しなかった"
   expect_no_log "$WORK/4.log" "が [0-9]+ 秒で [0-9]+ 回以上動かされた" "追従が暴走しなかった"
+
+  # ---- 4b. 無理やり動かしても元へ戻るか ------------------------------------
+  # **「掴んで動かしたウィンドウが戻ってこない」**という報告への確認。
+  #
+  # 通知だけでは足りない。こちらが戻した直後の読み戻しでは目標に一致していても、
+  # 離した拍子に掴んだ先へ書き直されることがある（実測）。そのあとは通知が
+  # 来ないので、定期的な見張りが無いと崩れたまま残る。
+  #
+  # 直前のドラッグで比率が変わっているので、**今の目標矩形を取り直してから**掴む。
+  GEOM="$(grep -oE '→ \([0-9]+, [0-9]+\) [0-9]+x[0-9]+' "$WORK/4.log" | tail -1 || true)"
+  X=$(echo "$GEOM" | sed -E 's/→ \(([0-9]+), ([0-9]+)\) ([0-9]+)x([0-9]+)/\1/')
+  Y=$(echo "$GEOM" | sed -E 's/→ \(([0-9]+), ([0-9]+)\) ([0-9]+)x([0-9]+)/\2/')
+  W=$(echo "$GEOM" | sed -E 's/→ \(([0-9]+), ([0-9]+)\) ([0-9]+)x([0-9]+)/\3/')
+  H=$(echo "$GEOM" | sed -E 's/→ \(([0-9]+), ([0-9]+)\) ([0-9]+)x([0-9]+)/\4/')
+  echo "    タイトルバー ($((X + W / 2)), $((Y + 12))) を掴んで大きく動かす"
+  "$APP" --emit-drag "$((X + W / 2)),$((Y + 12)):-400,300" >/dev/null 2>&1
+  sleep 4
+  if "$PROBE" windows --any-layer | grep -qE "^id=[0-9]+ layer=0 x=${X} y=${Y} w=${W} h=${H} "; then
+    ok "掴んで動かしたウィンドウが元の位置へ戻った"
+  else
+    ng "掴んで動かしたウィンドウが戻らなかった（期待 (${X},${Y}) ${W}x${H}）"
+    "$PROBE" windows --any-layer | sed 's/^/        /'
+  fi
+
+  # 外部から AX で位置と大きさを変えられた場合も戻ること。
+  # ドラッグとは経路が違う（ウィンドウ管理ツールや、自分で位置を決め直すアプリ）。
+  osascript -e 'tell application "System Events" to tell process "TextEdit" to set position of window 1 to {200, 200}' >/dev/null 2>&1 || true
+  osascript -e 'tell application "System Events" to tell process "TextEdit" to set size of window 1 to {600, 400}' >/dev/null 2>&1 || true
+  sleep 4
+  if "$PROBE" windows --any-layer | grep -qE "^id=[0-9]+ layer=0 x=200 y=200 "; then
+    ng "外部から動かされたウィンドウが戻らなかった"
+  else
+    ok "外部から動かされたウィンドウが元の位置へ戻った"
+  fi
   stop_comet
 fi
 

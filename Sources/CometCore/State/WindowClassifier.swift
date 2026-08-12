@@ -162,7 +162,7 @@ public enum WindowClassifier {
         //
         // **分からない（`nil`）ときは管理する。** 取得に失敗しただけで
         // 全ウィンドウが管理外になるほうが害が大きい。
-        if let layer = snapshot.layer, layer != WindowLayers.normal {
+        if let layer = snapshot.layer, layer != ScreenWindows.normalLayer {
             return .unmanaged(.alwaysOnTop)
         }
         // ネイティブフルスクリーンは独自の Space を作るため、

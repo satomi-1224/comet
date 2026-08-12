@@ -15,6 +15,12 @@ import CoreGraphics
 ///   モニタの付け替えで変わるため、古い値を使うとウィンドウが画面外へ飛ぶ。
 public enum Geometry {
 
+    /// ログに出す矩形の書き方。**撮った画面の画素と突き合わせられるように整数で出す。**
+    public static func rendered(_ rect: CGRect) -> String {
+        "(\(Int(rect.minX)),\(Int(rect.minY))) \(Int(rect.width))x\(Int(rect.height))"
+    }
+
+
     /// AppKit 座標（左下原点）→ AX 座標（左上原点）。
     public static func toAX(_ rect: CGRect, primaryMaxY: CGFloat) -> CGRect {
         CGRect(
