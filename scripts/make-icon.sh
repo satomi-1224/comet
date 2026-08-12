@@ -5,11 +5,17 @@
 # 正方形へ切り出し、`Resources/AppIcon.icns` を作る。
 #
 # 使い方:
-#   ./scripts/make-icon.sh ~/Desktop/icon.png [許容差]
+#   ./scripts/make-icon.sh <元画像> [comet-probe icon への追加オプション...]
 #
-# 許容差は「背景とみなす色の幅」。影を落としたいので既定は大きめ（100）。
-# **色だけで一律に抜くのではなく外周から繋がった部分だけを抜く**ので、
-# 図形の中の明るい部分（グロウなど）は許容差を上げても消えない。
+# 例（余白のある画像。背景を抜いて図形へ切り詰める）:
+#   ./scripts/make-icon.sh ~/Desktop/icon.png --tolerance 100
+#
+# 例（全面が絵柄の画像。範囲を指定して角を丸める）:
+#   ./scripts/make-icon.sh ~/Desktop/image.png --crop 1600,0,1200,1200 --corner-radius 22
+#
+# --tolerance は「背景とみなす色の幅」。**色だけで一律に抜くのではなく外周から
+# 繋がった部分だけを抜く**ので、大きくしても図形の中の明るい部分（グロウ）は消えない。
+# --crop を渡すと背景の除去は行わない（余白が無い画像は暗い部分まで抜けてしまうため）。
 #
 # 作り直したら `./scripts/build-app.sh` でバンドルへ入る。
 
@@ -17,11 +23,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 cd "$REPO_ROOT"
 
 SOURCE="${1:-}"
-TOLERANCE="${2:-100}"
 if [ -z "$SOURCE" ] || [ ! -f "$SOURCE" ]; then
-  echo "使い方: ./scripts/make-icon.sh <元画像> [許容差]" >&2
+  echo "使い方: ./scripts/make-icon.sh <元画像> [追加オプション...]" >&2
   exit 2
 fi
+shift
 
 PROBE="$REPO_ROOT/.build/debug/comet-probe"
 [ -x "$PROBE" ] || swift build --product comet-probe >/dev/null
@@ -29,8 +35,13 @@ PROBE="$REPO_ROOT/.build/debug/comet-probe"
 WORK="$(mktemp -d /tmp/comet-icon.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 
-echo "==> 背景を透明にして正方形へ切り出す（許容差 ${TOLERANCE}）"
-"$PROBE" icon "$SOURCE" "$WORK/icon.png" --tolerance "$TOLERANCE" --size 1024
+echo "==> 正方形へ切り出す"
+# bash 3.2 の set -u では空配列の展開がエラーになるので要素数で分岐する。
+if [ $# -gt 0 ]; then
+  "$PROBE" icon "$SOURCE" "$WORK/icon.png" --size 1024 "$@"
+else
+  "$PROBE" icon "$SOURCE" "$WORK/icon.png" --size 1024
+fi
 
 echo "==> 各サイズを書き出す"
 mkdir -p "$WORK/AppIcon.iconset"

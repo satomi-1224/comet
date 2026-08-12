@@ -55,8 +55,12 @@ let usage = """
           → 書き出したパス
 
       icon <入力png> <出力png> [--tolerance n] [--size n]
+            [--crop x,y,w,h] [--corner-radius 割合]
           アプリのアイコン用に切り出す。**外周から繋がった背景を透明にし**、
           残った部分の正方形へ切り詰めて伸縮する（既定 1024）。
+          --crop を渡すとその範囲を使い、背景の除去は行わない
+          （全面が絵柄で余白が無い画像はこちら）。
+          --corner-radius は出力の一辺に対する割合（macOS 風は 22）。
           → 書き出したパス と 切り出した範囲
 
       solid <png> <幅x高さ> <#rrggbb>
@@ -362,17 +366,40 @@ case "icon":
         fail("comet-probe icon <入力png> <出力png>")
     }
     let source = loadImage(arguments.positionals[0])
+    // **切り出す範囲を明示されたら背景の除去はしない。** 全面が絵柄の画像で
+    // 背景の除去を走らせると、外周と繋がった暗い部分（夜空など）まで抜けて穴が空く。
+    let explicitCrop = arguments.rect("crop")
     let keyTolerance = arguments.int("tolerance", default: 24)
-    guard let mask = source.backgroundMask(tolerance: keyTolerance) else {
+    let mask: Set<Int>
+    if explicitCrop != nil {
+        mask = []
+    } else if let detected = source.backgroundMask(tolerance: keyTolerance) {
+        mask = detected
+    } else {
         fail("画像を読めない: \(arguments.positionals[0])")
     }
 
     // 背景を透明にした画素の並びを作る。
+    //
+    // **アルファは全画素で必ず書く。** 読み込みは noneSkipLast（4バイト目は未使用）なので、
+    // そのまま premultipliedLast として解釈すると**不定値がアルファになる**。
+    // 縁に白い帯が出て中身にも白い斑点が散った（実際に出た）。
+    //
+    // 透明にする画素は **RGB も 0 にする。** premultipliedLast は「RGB にアルファが
+    // 既に掛かっている」前提で、アルファ 0 のまま明るい RGB を残すと不正なデータになり、
+    // 縮小の補間で明るい色が滲み出る。
     var bytes = source.bytes
-    for index in mask {
+    for index in 0..<(source.width * source.height) {
         let offset = index * 4
         guard offset + 3 < bytes.count else { continue }
-        bytes[offset + 3] = 0
+        if mask.contains(index) {
+            bytes[offset] = 0
+            bytes[offset + 1] = 0
+            bytes[offset + 2] = 0
+            bytes[offset + 3] = 0
+        } else {
+            bytes[offset + 3] = 255
+        }
     }
 
     // 残った部分（不透明な画素）の範囲へ切り詰め、正方形に整える。
@@ -386,24 +413,28 @@ case "icon":
         }
     }
     guard minX <= maxX else { fail("背景しか無い") }
-    let content = IntRect(x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1)
+    let content = explicitCrop ?? IntRect(
+        x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1)
+    guard content.isInside(source.bounds) || explicitCrop == nil else {
+        fail("--crop の範囲が画像の外: \(content) / 画像 \(source.bounds)")
+    }
     let square = content.squared(within: source.bounds)
 
     // 透明を保てる形式（premultipliedLast）で描き直して書き出す。
     let side = arguments.int("size", default: 1024)
     guard let space = CGColorSpace(name: CGColorSpace.sRGB) else { fail("色空間を作れない") }
-    var cutout: CGImage?
-    bytes.withUnsafeMutableBytes { buffer in
-        guard
-            let context = CGContext(
-                data: buffer.baseAddress, width: source.width, height: source.height,
-                bitsPerComponent: 8, bytesPerRow: source.width * 4, space: space,
-                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-        else { return }
-        cutout = context.makeImage()
+    // **`CGContext(data:)` + `makeImage()` を閉じ込めの外で使ってはいけない。**
+    // 画像が元の配列の記憶域を参照したままになり、縮小のときに壊れた画素を読む
+    // （縁に白い枠が出た原因のひとつ）。データを持つ provider から作る。
+    guard let provider = CGDataProvider(data: Data(bytes) as CFData) else {
+        fail("画像を作れない")
     }
     guard
-        let whole = cutout,
+        let whole = CGImage(
+            width: source.width, height: source.height, bitsPerComponent: 8, bitsPerPixel: 32,
+            bytesPerRow: source.width * 4, space: space,
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent),
         let cropped = whole.cropping(
             to: CGRect(x: square.x, y: square.y, width: square.width, height: square.height)),
         let output = CGContext(
@@ -411,6 +442,17 @@ case "icon":
             space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
     else { fail("切り出せない") }
     output.interpolationQuality = .high
+    // 角丸。**クリップしてから描くので角は反エイリアスされて透明になる。**
+    // macOS のアイコンは一辺の 22% 前後で丸めてある。
+    let radiusPercent = arguments.int("corner-radius", default: 0)
+    if radiusPercent > 0 {
+        let radius = CGFloat(side) * CGFloat(min(radiusPercent, 50)) / 100
+        output.addPath(
+            CGPath(
+                roundedRect: CGRect(x: 0, y: 0, width: side, height: side),
+                cornerWidth: radius, cornerHeight: radius, transform: nil))
+        output.clip()
+    }
     output.draw(cropped, in: CGRect(x: 0, y: 0, width: side, height: side))
     guard let scaled = output.makeImage(),
         let destination = CGImageDestinationCreateWithURL(

@@ -102,13 +102,20 @@ screencapture -x /tmp/screen.png
 ### アイコンを作り直す
 
 ```bash
-./scripts/make-icon.sh ~/Desktop/icon.png    # → Resources/AppIcon.icns
-./scripts/build-app.sh release                # バンドルへ入る
+# 全面が絵柄の画像から、範囲を指定して角を丸める（今のアイコンはこれ）
+./scripts/make-icon.sh ~/Desktop/image.png --crop 1600,0,1200,1200 --corner-radius 22
+
+# 余白と影が付いた画像から、背景を抜いて図形へ切り詰める
+./scripts/make-icon.sh ~/Desktop/icon.png --tolerance 100
+
+./scripts/build-app.sh release   # バンドルへ入る
 ```
 
-生成画像には余白と影が付いてくるので、**外周から繋がっている背景だけを透明にして**
-正方形へ切り詰める。色だけで一律に抜くと、図形の中の明るい部分（グロウなど）まで
-抜けて穴が空くため。第2引数で背景とみなす色の幅を変えられる（既定 100・影を落とす）。
+- `--crop` を渡すと**背景の除去はしない**。余白の無い画像で走らせると、外周と繋がった
+  暗い部分（夜空など）まで抜けて穴が空くため
+- `--tolerance` は背景とみなす色の幅。**色だけで一律に抜くのではなく外周から繋がった
+  部分だけを抜く**ので、大きくしても図形の中の明るい部分（グロウ）は消えない
+- `--corner-radius` は一辺に対する割合。macOS のアイコンは 22 前後
 
 ### コマンド
 
