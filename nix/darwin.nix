@@ -32,7 +32,9 @@ let
   # 明示しておくと plist の名前が読めるので、入れ替えのときに登録を戻せる。
   label = "org.nixos.comet";
 
-  homeDirectory = "/Users/${cfg.user}";
+  # 宣言してあればそちらを使う。nix-darwin の既定も /Users/<名前> だが、
+  # 変えている構成で食い違わせない。
+  homeDirectory = config.users.users.${cfg.user}.home or "/Users/${cfg.user}";
 
   # root から利用者へ降りて実行する。ログイン中のセッションを引き継げるよう
   # `sudo -u` を使う（`su` ではキーチェーンに届かないことがある）。
@@ -49,10 +51,20 @@ in
   }) // {
     user = lib.mkOption {
       type = lib.types.str;
-      default = config.system.primaryUser or "";
+      # `system.primaryUser` は nullOr str で既定が null。そのまま渡すと
+      # 「null なのに文字列が要る」で落ちるので、空文字にして下の assertion に任せる。
+      default =
+        let
+          primary = config.system.primaryUser or null;
+        in
+        if primary == null then "" else primary;
       defaultText = lib.literalExpression "config.system.primaryUser";
       description = ''
         comet を動かす利用者。設定ファイルと launchd agent はこの利用者のホームに置く。
+
+        **`system.primaryUser` は別途設定が要る。** nix-darwin は `launchd.user.agents`
+        を使う構成にこれを要求する（activation が root で走るようになったため）。
+        `user` を明示するのは、`system.primaryUser` とは別の利用者で動かしたいときだけでよい。
       '';
     };
   };
@@ -90,10 +102,20 @@ in
     system.activationScripts.postActivation.text = lib.mkAfter (
       # 設定ファイル。書いていないときは置かない。空の TOML を置くと
       # キーバインドが1つも登録されない状態になる。
-      (lib.optionalString hasSettings ''
-        ${asUser "/bin/mkdir -p ${lib.escapeShellArg "${homeDirectory}/.config/comet"}"}
-        ${asUser "/bin/ln -sfn ${configFile} ${lib.escapeShellArg "${homeDirectory}/.config/comet/config.toml"}"}
-      '')
+      (lib.optionalString hasSettings (
+        let
+          target = "${homeDirectory}/.config/comet/config.toml";
+        in
+        ''
+          ${asUser "/bin/mkdir -p ${lib.escapeShellArg "${homeDirectory}/.config/comet"}"}
+          # 手で書いた config.toml を黙って消さない。symlink でない実体があれば退避する。
+          if [ -e ${lib.escapeShellArg target} ] && [ ! -L ${lib.escapeShellArg target} ]; then
+            echo "comet: 既存の config.toml を ${target}.backup へ退避する" >&2
+            ${asUser "/bin/mv ${lib.escapeShellArg target} ${lib.escapeShellArg "${target}.backup"}"}
+          fi
+          ${asUser "/bin/ln -sfn ${configFile} ${lib.escapeShellArg target}"}
+        ''
+      ))
       +
       # 本体。ストアから `app` へ入れ替える。
       (if cfg.package != null then ''

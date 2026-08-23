@@ -182,6 +182,12 @@ flake を input に足して、使っている仕組みに合わせてモジュ�
 **キーバインドは置き換えです**（既定へ追加されるのではありません）。書くなら必要なものを
 全部書いてください。設定は保存を検知して自動で読み直すので、switch すればそのまま反映されます。
 
+> [!NOTE]
+> `enable = false` にすると launchd の登録と設定ファイルは消えますが、
+> **`app` に置いた本体は残ります**（ストアの外なので Nix が回収しません）。
+> 消すなら `rm -rf ~/Applications/comet.app` と
+> `rm -rf ~/Library/Application\ Support/comet` を手で実行してください。
+
 #### 更新する
 
 ```bash
