@@ -11,10 +11,16 @@ import CometSupport
 public final class DecorationController {
 
     public let border: FocusBorder
+    /// フォーカスしていないタイルの枠線。`[border] color-unfocused` を書いたときだけ描く。
+    public let tileBorders: TileBorders
     public let indicator: WorkspaceIndicator
     public let wallpaper: WallpaperService
 
     private var workspaceCount: Int
+    /// ワークスペース番号 → 名前。インジケータの表示にだけ使う。
+    public var workspaceNames: [WorkspaceID: String] = [:] {
+        didSet { indicator.names = workspaceNames }
+    }
     private let log: Log
 
     public init(
@@ -25,6 +31,7 @@ public final class DecorationController {
         log: Log = .shared
     ) {
         self.border = FocusBorder(style: border, log: log)
+        self.tileBorders = TileBorders(style: border, log: log)
         self.indicator = WorkspaceIndicator(
             style: indicator, hudDuration: hudDuration, log: log)
         self.wallpaper = WallpaperService(log: log)
@@ -44,6 +51,11 @@ public final class DecorationController {
             paths, directory: directory, workspaceCount: workspaceCount ?? self.workspaceCount)
     }
 
+    /// フォーカスしていないタイルの矩形が変わった。
+    public func tiledFramesChanged(_ frames: [(id: CGWindowID, frame: CGRect)]) {
+        tileBorders.update(frames)
+    }
+
     /// フォーカス中のウィンドウが決まった。
     ///
     /// **AX の適用完了を待たずに呼ばれる。** 枠線が先に着地することで遅延が視覚的に隠れる。
@@ -56,17 +68,23 @@ public final class DecorationController {
         border.show(around: focused.frame, windowID: focused.id)
     }
 
-    /// 表示するワークスペースが変わった。
+    /// ワークスペースの見え方が変わった。
     ///
     /// **壁紙とインジケータはウィンドウ移動の発行より先に更新する。**
     /// どちらも自プロセス側の処理なので即座に終わり、切替が速く見える（症状D）。
-    public func workspaceChanged(to workspace: WorkspaceID) {
-        wallpaper.apply(for: workspace)
-        indicator.update(to: workspace, of: workspaceCount)
+    ///
+    /// 2画面では壁紙もインジケータもモニタごとに違うので、状態をまとめて受ける。
+    public func workspaceStatusChanged(_ status: WorkspaceStatus) {
+        wallpaper.apply(
+            assignments: status.visible.map {
+                (monitor: $0.monitor, workspace: $0.workspace)
+            })
+        indicator.update(status)
     }
 
     public func stop() {
         border.hide()
+        tileBorders.stop()
         indicator.stop()
     }
 }

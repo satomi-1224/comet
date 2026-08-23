@@ -13,7 +13,8 @@ public final class WallpaperService {
 
     /// ワークスペース → 壁紙。**実在するものだけが入る。**
     private var urls: [WorkspaceID: URL] = [:]
-    private var lastApplied: WorkspaceID?
+    /// モニタごとに最後に敷いた壁紙。`nil` キーは「全画面へ同じものを敷いた」ぶん。
+    private var lastApplied: [MonitorID?: WorkspaceID] = [:]
     private let log: Log
 
     public init(log: Log = .shared) {
@@ -65,17 +66,49 @@ public final class WallpaperService {
     /// ワークスペース切替の最初期（ウィンドウ移動の発行前）に呼ぶこと。
     public func apply(for workspace: WorkspaceID) {
         guard let url = urls[workspace] else { return }
-        guard lastApplied != workspace else { return }
-        lastApplied = workspace
+        guard lastApplied[nil] != workspace else { return }
+        lastApplied[nil] = workspace
 
         for screen in NSScreen.screens {
-            do {
-                try NSWorkspace.shared.setDesktopImageURL(url, for: screen, options: [:])
-            } catch {
-                log.warn("壁紙を設定できなかった: \(url.lastPathComponent): \(error)")
-            }
+            set(url, on: screen)
         }
         log.debug("壁紙を切り替えた: ワークスペース \(workspace) → \(url.lastPathComponent)")
+    }
+
+    /// モニタごとに違うワークスペースを映しているときの壁紙。
+    ///
+    /// **2画面では画面ごとに違う壁紙になる。** 全画面に同じものを敷くと、
+    /// 「どちらがどのワークスペースか」の手掛かりが消える。
+    public func apply(assignments: [(monitor: MonitorID, workspace: WorkspaceID)]) {
+        guard !urls.isEmpty else { return }
+        let screens = Dictionary(
+            NSScreen.screens.compactMap { screen -> (MonitorID, NSScreen)? in
+                guard
+                    let number = screen.deviceDescription[
+                        NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+                else { return nil }
+                return (MonitorID(number.uint32Value), screen)
+            }, uniquingKeysWith: { first, _ in first })
+
+        for assignment in assignments {
+            guard let url = urls[assignment.workspace],
+                let screen = screens[assignment.monitor],
+                lastApplied[assignment.monitor] != assignment.workspace
+            else { continue }
+            lastApplied[assignment.monitor] = assignment.workspace
+            set(url, on: screen)
+            log.debug(
+                "壁紙を切り替えた: ワークスペース \(assignment.workspace) → "
+                    + "\(url.lastPathComponent)（モニタ #\(assignment.monitor)）")
+        }
+    }
+
+    private func set(_ url: URL, on screen: NSScreen) {
+        do {
+            try NSWorkspace.shared.setDesktopImageURL(url, for: screen, options: [:])
+        } catch {
+            log.warn("壁紙を設定できなかった: \(url.lastPathComponent): \(error)")
+        }
     }
 
     // MARK: - ディレクトリからの割り当て（純粋）

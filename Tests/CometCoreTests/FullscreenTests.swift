@@ -71,13 +71,22 @@ struct FullscreenTests {
 
     @Test("設定に fullscreen と書ける")
     func parsesCommand() throws {
-        #expect(try Command.parse("fullscreen") == .fullscreen)
-        #expect(Command.fullscreen.description == "fullscreen")
+        #expect(try Command.parse("fullscreen") == .fullscreen(.toggle))
+        #expect(Command.fullscreen(.toggle).description == "fullscreen")
+        // i3 の綴り。`global` は付いていても無視する。
+        #expect(try Command.parse("fullscreen toggle") == .fullscreen(.toggle))
+        #expect(try Command.parse("fullscreen enable") == .fullscreen(.on))
+        #expect(try Command.parse("fullscreen disable") == .fullscreen(.off))
+        #expect(try Command.parse("fullscreen toggle global") == .fullscreen(.toggle))
+        #expect(Command.fullscreen(.on).description == "fullscreen enable")
+        #expect(throws: Command.ParseError.self) { try Command.parse("fullscreen sideways") }
     }
 
-    @Test("引数は取らない")
-    func rejectsArguments() {
-        #expect(throws: Command.ParseError.wrongArgumentCount(name: "fullscreen", expected: "0", got: 1)) {
+    @Test("読めない引数は誤りとして扱う")
+    func rejectsUnknownArguments() {
+        #expect(
+            throws: Command.ParseError.invalidArgument(name: "fullscreen", argument: "next")
+        ) {
             try Command.parse("fullscreen next")
         }
     }

@@ -42,13 +42,16 @@ public enum TreeSync {
     ///   - tiled: タイル対象のウィンドウ。**並び順は新規追加のときだけ意味を持つ。**
     ///     既にツリーにあるウィンドウを並べ替えることはしない（勝手に入れ替わって見える）。
     ///   - focused: 新しいウィンドウを置く基準。この隣、またはこの領域を分割して入る。
+    ///   - split: `split` コマンド（i3 の `split h` / `split v`）で予約された分割の向き。
+    ///     **基準のウィンドウが一致するときだけ**効く。
     @discardableResult
     public static func reconcile(
         root: ContainerNode,
         tiled: [CGWindowID],
         focused: CGWindowID? = nil,
         strategy: InsertionStrategy = .split,
-        normalization: NormalizationConfig = .default
+        normalization: NormalizationConfig = .default,
+        split: (windowID: CGWindowID, orientation: Orientation)? = nil
     ) -> Change {
         var change = Change()
 
@@ -68,9 +71,13 @@ public enum TreeSync {
         // 追加の基準は「今フォーカスされているウィンドウ」。基準を入れたばかりの
         // ウィンドウへ進めていくことで、複数の新規が渡された順に並ぶ。
         var anchor = focused.flatMap { root.findWindow($0) }
+        // 予約された分割は**最初の1枚にだけ**効かせる。2枚目からは通常の入り方に戻す
+        //（i3 も split したあと1枚入れば予約は消える）。
+        var pendingSplit = split.flatMap { $0.windowID == anchor?.windowID ? $0.orientation : nil }
         for id in ordered where root.findWindow(id) == nil {
             let node = WindowNode(id)
-            insert(node, near: anchor, in: root, strategy: strategy)
+            insert(node, near: anchor, in: root, strategy: strategy, split: pendingSplit)
+            pendingSplit = nil
             anchor = node
             change.inserted.append(id)
         }
@@ -83,10 +90,29 @@ public enum TreeSync {
         _ node: WindowNode,
         near anchor: WindowNode?,
         in root: ContainerNode,
-        strategy: InsertionStrategy
+        strategy: InsertionStrategy,
+        split: Orientation? = nil
     ) {
         guard let anchor, let parent = anchor.parent, let index = parent.index(of: anchor) else {
             root.append(node)
+            return
+        }
+
+        // `split` コマンドで向きを指定されていれば、設定の入り方より優先する。
+        if let split {
+            // 親が既にその向きなら、包まずに隣へ並べれば同じ形になる。
+            // **余計な入れ子を作らない**（作っても正規化で潰れるので形は同じだが、
+            // 潰れる前の1フレームで比率が変わって見える）。
+            if parent.orientation == split {
+                parent.insert(node, at: index + 1)
+                return
+            }
+            let container = ContainerNode(orientation: split)
+            parent.replace(at: index, with: container)
+            // **利用者が選んだ向きなので正規化で反転させない。**
+            container.isOrientationExplicit = true
+            container.append(anchor)
+            container.append(node)
             return
         }
 

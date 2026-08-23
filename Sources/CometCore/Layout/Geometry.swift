@@ -99,6 +99,20 @@ public enum Geometry {
     ///
     /// AX でサイズを設定してもアプリ側の制約で 1pt 未満ずれることがあり、
     /// 厳密比較だと無意味な再適用を繰り返す。
+    /// 矩形を領域の中へ押し込む。
+    ///
+    /// **フローティングのウィンドウをキーボードで動かすときに要る。** 画面の外へ
+    /// 出せてしまうと、以後どのキーでも呼び戻せない（macOS もタイトルバーが
+    /// 残る位置までしか許さないので、中途半端に隠れて終わる）。
+    ///
+    /// 領域より大きい矩形は左上を合わせるだけにする。押し込みようがない。
+    public static func clamped(_ rect: CGRect, within area: CGRect) -> CGRect {
+        var result = rect
+        result.origin.x = min(max(rect.minX, area.minX), max(area.minX, area.maxX - rect.width))
+        result.origin.y = min(max(rect.minY, area.minY), max(area.minY, area.maxY - rect.height))
+        return result
+    }
+
     public static func isApproximatelyEqual(
         _ lhs: CGRect, _ rhs: CGRect, tolerance: CGFloat
     ) -> Bool {

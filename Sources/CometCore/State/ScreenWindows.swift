@@ -1,4 +1,5 @@
 import CoreGraphics
+import Darwin
 
 /// 画面上のウィンドウを `CGWindowList` から読む。
 ///
@@ -21,10 +22,17 @@ public enum ScreenWindows {
         public let layer: Int
         /// 左上原点。AX と同じ向きなのでそのまま突き合わせられる。
         public let bounds: CGRect
+        /// 持ち主のプロセス。**取りこぼしたウィンドウを見つけるのに使う。**
+        ///
+        /// AX の生成通知は取りこぼしうる（生まれた直後の要素は ID も属性も返さない
+        /// ことがある）。一覧側に持ち主が分かれば「監視しているアプリなのに台帳に
+        /// 無いウィンドウ」を検出して走査し直せる。
+        public let ownerPID: pid_t
 
-        public init(layer: Int, bounds: CGRect) {
+        public init(layer: Int, bounds: CGRect, ownerPID: pid_t = 0) {
             self.layer = layer
             self.bounds = bounds
+            self.ownerPID = ownerPID
         }
     }
 
@@ -59,7 +67,8 @@ public enum ScreenWindows {
             {
                 rect = parsed
             }
-            entries[id] = Entry(layer: layer, bounds: rect)
+            let owner = (info[kCGWindowOwnerPID as String] as? pid_t) ?? 0
+            entries[id] = Entry(layer: layer, bounds: rect, ownerPID: owner)
         }
         return entries
     }

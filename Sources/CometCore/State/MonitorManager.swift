@@ -3,6 +3,14 @@ import CoreGraphics
 import Foundation
 import CometSupport
 
+/// 並べる対象のディスプレイ。
+public enum MonitorScope: String, Sendable, Equatable, CaseIterable {
+    /// すべてのディスプレイを並べる。**既定。** i3 は全ての output をタイルする。
+    case all
+    /// メインディスプレイだけを並べる。他は素の macOS のまま使う。
+    case main
+}
+
 /// ディスプレイ構成の把握。
 ///
 /// 1画面運用でも必須。外部モニタを付け替えると解像度・union 矩形・プライマリの高さが
@@ -45,6 +53,18 @@ public final class MonitorManager {
         monitors.first(where: \.isPrimary) ?? monitors.first
     }
 
+    /// 識別子で引く。
+    public func monitor(id: CGDirectDisplayID) -> Monitor? {
+        monitors.first { $0.id == id }
+    }
+
+    /// その矩形を持っているモニタ。中心が乗っているモニタで決める。
+    ///
+    /// どのモニタにも乗っていなければ（退避中のウィンドウなど）プライマリに寄せる。
+    public func owner(of rect: CGRect) -> Monitor? {
+        Self.owner(of: rect, among: monitors) ?? primary
+    }
+
     /// その矩形を持っているモニタ。**中心が乗っているモニタ**で決める。
     ///
     /// 面積比で決めると、2画面に跨がるウィンドウが境界付近で行き来して落ち着かない。
@@ -81,6 +101,9 @@ public final class MonitorManager {
         let maxY = Self.primaryMaxY
         let screens = NSScreen.screens
 
+        // **並び順は左から右。** `next` / `prev` がこの順に従うので、
+        // `NSScreen.screens` の順（不定）をそのまま使うと押すたびに行き先が変わる。
+        // プライマリは `screens[0]`（メニューバーのある画面）なので、並べ替える前に決める。
         monitors = screens.enumerated().map { index, screen in
             let number =
                 screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
@@ -90,6 +113,10 @@ public final class MonitorManager {
                 visibleFrame: Geometry.toAX(screen.visibleFrame, primaryMaxY: maxY),
                 isPrimary: index == 0,
                 scale: screen.backingScaleFactor)
+        }
+        .sorted {
+            $0.frame.minX == $1.frame.minX
+                ? $0.frame.minY < $1.frame.minY : $0.frame.minX < $1.frame.minX
         }
 
         log.debug(

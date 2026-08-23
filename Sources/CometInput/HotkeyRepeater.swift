@@ -29,11 +29,23 @@ public final class HotkeyRepeater {
 
     /// 押されたときに呼ぶ。**`action` はここでは実行しない**（押下時の1回目は
     /// 呼び出し側が既に実行しているため）。遅延のあと繰り返しを始める。
-    public func begin(_ hotkey: Hotkey, action: @escaping @MainActor () -> Void) {
+    ///
+    /// - Parameter interval: この押下だけの繰り返し間隔。**コマンドによって
+    ///   適切な速さが違う**ので上書きできるようにしてある。境界を動かす `resize` は
+    ///   速いほうが追従して気持ちよいが、`focus` は1回ごとにアプリの前面化を
+    ///   伴うので同じ速さでは macOS 側が追いつかない。
+    public func begin(
+        _ hotkey: Hotkey, interval: TimeInterval? = nil,
+        action: @escaping @MainActor () -> Void
+    ) {
         cancel(hotkey)
         generation += 1
+        intervals[hotkey] = interval
         schedule(hotkey, after: delay, generation: generation, action: action)
     }
+
+    /// 押下ごとの間隔の上書き。
+    private var intervals: [Hotkey: TimeInterval?] = [:]
 
     /// 離されたときに呼ぶ。
     public func end(_ hotkey: Hotkey) {
@@ -55,8 +67,8 @@ public final class HotkeyRepeater {
                 guard let self, self.active[hotkey] != nil else { return }
                 action()
                 // 次の繰り返しを積む。離されると `end` が積むのを止める。
-                self.schedule(
-                    hotkey, after: self.interval, generation: generation, action: action)
+                let wait = self.intervals[hotkey].flatMap { $0 } ?? self.interval
+                self.schedule(hotkey, after: wait, generation: generation, action: action)
             }
         }
         active[hotkey] = item
@@ -65,5 +77,6 @@ public final class HotkeyRepeater {
 
     private func cancel(_ hotkey: Hotkey) {
         active.removeValue(forKey: hotkey)?.cancel()
+        intervals.removeValue(forKey: hotkey)
     }
 }

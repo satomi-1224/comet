@@ -78,3 +78,65 @@ struct LayoutGuardTests {
         #expect(!LayoutGuard.isOff(desired.offsetBy(dx: 1, dy: -1), from: desired))
     }
 }
+
+/// 「もう寄せ切れない」と分かった姿に落ち着いているかの判定。
+///
+/// **実機で見つけた発振を止めるために入れた。** 端末（ターミナル.app）は文字セル
+/// 単位でしかリサイズできないため、要求 955x964 に対して実測 955x959 で止まる。
+/// 補正が3回で諦めたあと、見張りが「2pt より大きくずれている」と判定して戻しに行き、
+/// また諦める、が 20 秒周期で永久に続いた（47 秒で 13 回、約 52 回の AX 往復）。
+@Suite("寄せ切れない相手との押し合いを止める")
+struct SettledAtLimitTests {
+
+    private let desired = CGRect(x: 962, y: 28, width: 955, height: 964)
+    /// 実機で観測した「端末が落ち着く姿」。高さが 5pt 足りない。
+    private let actual = CGRect(x: 962, y: 28, width: 955, height: 959)
+
+    @Test("諦めた実績が無ければ、ずれは戻す対象")
+    func withoutHistoryItIsStillOff() {
+        #expect(LayoutGuard.isOff(actual, from: desired))
+        #expect(!LayoutGuard.isSettledAtLimit(actual: actual, desired: desired, tolerated: nil))
+    }
+
+    @Test("同じ目標で同じ姿に落ち着いたなら、それが限界")
+    func sameTargetAndSameActualIsSettled() {
+        #expect(
+            LayoutGuard.isSettledAtLimit(
+                actual: actual, desired: desired,
+                tolerated: (target: desired, actual: actual)))
+    }
+
+    /// **目標が変わったら試し直す。** 前の目標に届かなかったことは、
+    /// 新しい目標に届かない理由にはならない（ギャップ変更や隣の増減で寸法は変わる）。
+    @Test("目標が変わったら限界の記憶は効かない")
+    func aNewTargetIsRetried() {
+        let moved = desired.offsetBy(dx: 0, dy: 40)
+        #expect(
+            !LayoutGuard.isSettledAtLimit(
+                actual: actual, desired: moved,
+                tolerated: (target: desired, actual: actual)))
+    }
+
+    /// **掴んで動かされたら戻す。** 限界の記憶があっても、実測がその姿から
+    /// 離れたなら利用者か他のアプリが動かしたということ。
+    @Test("実測が限界の姿から離れたら戻す")
+    func aMovedWindowIsStillRestored() {
+        let dragged = actual.offsetBy(dx: 200, dy: 0)
+        #expect(
+            !LayoutGuard.isSettledAtLimit(
+                actual: dragged, desired: desired,
+                tolerated: (target: desired, actual: actual)))
+    }
+
+    /// アプリ側の丸めで 1pt 程度は毎回ぶれる。ここで厳密比較にすると
+    /// 記憶が一度も効かず、押し合いが止まらない。
+    @Test("1pt のぶれは同じ姿とみなす")
+    func subPixelJitterIsTheSameShape() {
+        let jittered = CGRect(
+            x: actual.minX, y: actual.minY, width: actual.width, height: actual.height + 1)
+        #expect(
+            LayoutGuard.isSettledAtLimit(
+                actual: jittered, desired: desired,
+                tolerated: (target: desired, actual: actual)))
+    }
+}

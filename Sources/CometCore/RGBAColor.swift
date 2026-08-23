@@ -68,18 +68,29 @@ public struct BorderStyle: Equatable, Sendable {
     public var width: CGFloat
     public var radius: CGFloat
     public var focusedColor: RGBAColor
+    /// フォーカスしていないタイルの枠線の色。**`nil` なら描かない。**
+    ///
+    /// i3 は全てのウィンドウに枠を描き、色でフォーカスを表す。macOS では
+    /// ウィンドウ自身に影と枠があるため、既定はフォーカス中の1枚だけにしてある。
+    /// 分割の形を見せたいときに指定する。
+    public var unfocusedColor: RGBAColor?
 
     public init(
         isEnabled: Bool = true,
         width: CGFloat = 2,
         radius: CGFloat = 10,
-        focusedColor: RGBAColor = RGBAColor(hex: "#7aa2f7") ?? .clear
+        focusedColor: RGBAColor = RGBAColor(hex: "#7aa2f7") ?? .clear,
+        unfocusedColor: RGBAColor? = nil
     ) {
         self.isEnabled = isEnabled
         self.width = max(0, width)
         self.radius = max(0, radius)
         self.focusedColor = focusedColor
+        self.unfocusedColor = unfocusedColor
     }
+
+    /// フォーカスしていないタイルにも枠を描くか。
+    public var drawsUnfocused: Bool { isEnabled && width > 0 && unfocusedColor != nil }
 
     /// ウィンドウ矩形に対する枠線ウィンドウの矩形。
     ///

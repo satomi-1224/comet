@@ -118,6 +118,46 @@ if let spec = options.emitDrag {
     exit(0)
 }
 
+if let spec = options.emitMove {
+    let parts = spec.split(separator: ",").compactMap { Double($0) }
+    guard parts.count == 2 else {
+        FileHandle.standardError.write(Data("--emit-move は x,y の形で指定する\n".utf8))
+        exit(2)
+    }
+    guard AXPermission.isTrusted() else {
+        FileHandle.standardError.write(
+            Data("送出側にアクセシビリティ権限が無い。イベントは届かない\n".utf8))
+        exit(3)
+    }
+    let point = CGPoint(x: parts[0], y: parts[1])
+    SyntheticEvents.postMouseMove(to: point)
+    print("送出: ポインタ (\(Int(point.x)),\(Int(point.y)))")
+    exit(0)
+}
+
+// MARK: - 常駐している comet への送信
+
+// **インスタンスロックより前に処理して終了する。** 常駐している comet へ
+// 要求を送るための一発起動なので、ロックを取ると自分自身に弾かれる。
+//
+// 送る側には権限が要らない（UNIX ドメインソケットの読み書きだけ）。
+// キーの合成と違って他のアプリのキーバインドとも衝突しない。
+if let message = options.send ?? options.query.map({ "?\($0)" }) {
+    do {
+        let (succeeded, body) = try CommandClient.send(message)
+        let text = body.hasSuffix("\n") || body.isEmpty ? body : body + "\n"
+        if succeeded {
+            FileHandle.standardOutput.write(Data(text.utf8))
+            exit(0)
+        }
+        FileHandle.standardError.write(Data(text.utf8))
+        exit(1)
+    } catch {
+        FileHandle.standardError.write(Data("\(error)\n".utf8))
+        exit(4)
+    }
+}
+
 // MARK: - 設定
 
 // 設定の誤りで起動を止めない。読めなかった項目は既定値に落ちて `problems` に理由が残る。
@@ -160,14 +200,13 @@ case .builtIn:
 @MainActor
 func reportConfigProblems(_ problems: [Problem]) {
     let unsupported = problems.filter {
-        $0.kind == .unsupportedCommand || $0.kind == .unsupportedMode
-            || $0.kind == .unsupportedOption
+        $0.kind == .unsupportedCommand || $0.kind == .unsupportedOption
     }
     for problem in problems where !unsupported.contains(problem) {
         Log.shared.warn("設定: \(problem)")
     }
     guard !unsupported.isEmpty else { return }
-    Log.shared.info("設定: 未対応のため \(unsupported.count) 件を飛ばした（後続の Phase で実装する）")
+    Log.shared.info("設定: 未対応のため \(unsupported.count) 件を飛ばした")
     for problem in unsupported {
         Log.shared.debug("設定: \(problem)")
     }
@@ -271,6 +310,10 @@ engine.focusFollowsActivation = configuration.focusFollowsActivation
 engine.hiddenWindowStrategy = configuration.hiddenWindowStrategy
 engine.focusCycleReset = configuration.focusCycleReset
 engine.focusCycleScope = configuration.focusCycleScope
+engine.monitorScope = configuration.monitorScope
+engine.workspaceAutoBackAndForth = configuration.workspaceAutoBackAndForth
+engine.focusFollowsMouse = configuration.focusFollowsMouse
+engine.focusWrapping = configuration.focusWrapping
 
 // MARK: - 内蔵UI
 //
@@ -282,6 +325,7 @@ let decoration = DecorationController(
     hudDuration: configuration.hudDuration,
     workspaceCount: configuration.workspaceCount,
     log: log)
+decoration.workspaceNames = configuration.workspaceNames
 decoration.loadWallpapers(
     configuration.wallpapers, directory: configuration.wallpaperDirectory,
     workspaceCount: configuration.workspaceCount)
@@ -291,17 +335,54 @@ decoration.loadWallpapers(
 engine.onFocusedFrameChanged = { [weak decoration] focused in
     decoration?.focusedFrameChanged(to: focused)
 }
-engine.onWorkspaceChanged = { [weak decoration] workspace in
-    decoration?.workspaceChanged(to: workspace)
+engine.onWorkspaceStatusChanged = { [weak decoration] status in
+    decoration?.workspaceStatusChanged(status)
+}
+engine.onTiledFramesChanged = { [weak decoration] frames in
+    decoration?.tiledFramesChanged(frames)
 }
 
 engine.start()
 
 // 起動時のインジケータを合わせる（切替が起きるまで何も出ないのを避ける）。
-decoration.workspaceChanged(to: engine.activeWorkspaceID)
+decoration.workspaceStatusChanged(engine.workspaceStatus)
 
 if engine.isTimingEnabled {
     log.info("計測が有効。ctrl-alt-shift-t で適用レイテンシを出力する")
+}
+
+// MARK: - 外からの受付（i3 の i3-msg 相当）
+
+// **インスタンスロックを取ったあとで始めること。** 残っているソケットを消してから
+// 作るので、二重起動中に始めると動いている側の口を奪う。
+let commandServer = CommandServer(log: log)
+do {
+    try commandServer.start { request in
+        // 要求は利用者の入力。**解釈できたものだけ実行する。**
+        guard request.hasPrefix("?") else {
+            do {
+                let command = try Command.parse(request)
+                engine.execute(command)
+                Log.shared.debug("受付: \(command)")
+                return .ok("\(command)")
+            } catch {
+                return .failure("\(error)")
+            }
+        }
+        switch String(request.dropFirst()) {
+        case "workspaces": return .ok(engine.workspacesDescription)
+        case "windows": return .ok(engine.windowsDescription)
+        case "monitors": return .ok(engine.monitorsDescription)
+        case "tree": return .ok(engine.treesDescription)
+        case "state": return .ok(engine.stateDescription)
+        default:
+            return .failure(
+                "問い合わせられるのは workspaces / windows / monitors / tree / state のいずれか")
+        }
+    }
+} catch {
+    // 受付が無くてもウィンドウマネージャとしては動く。止めない。
+    log.warn("コマンドの受付を開始できなかった: \(error)")
 }
 
 // MARK: - 設定によるホットキー
@@ -319,31 +400,25 @@ hotkeyManager.onRelease = { hotkey in
     repeater.end(hotkey)
 }
 
-/// 押しっぱなしで繰り返してよいコマンドか。
+/// 方向フォーカスを繰り返す間隔。**アプリの前面化が伴うのでこれ以上速くしない。**
 ///
-/// 繰り返すのは **`resize` だけ**にする。`move` や `workspace` が連射されると
-/// ウィンドウが飛んでいって収拾がつかない。
-@MainActor
-func isRepeatable(_ commands: [Command]) -> Bool {
-    !commands.isEmpty
-        && commands.allSatisfy {
-            if case .resize = $0 { return true }
-            return false
-        }
-}
+/// どのコマンドを繰り返すかの判断は ``Swift/Array/repeatInterval(base:focus:)``。
+let focusRepeatInterval: TimeInterval = 0.12
 
 @MainActor
-func registerConfiguredHotkeys(_ bindings: [Binding]) {
+func registerConfiguredHotkeys(_ bindings: [Binding], mode: String) {
     var bound = 0
+    let isMain = mode == Configuration.mainMode
     for binding in bindings {
-        let repeatable = isRepeatable(binding.commands)
+        let interval = binding.commands.repeatInterval(
+            base: configuration.performance.repeatInterval, focus: focusRepeatInterval)
         do {
-            try hotkeyManager.register(binding.hotkey) { hotkey in
+            try hotkeyManager.register(binding.hotkey, warnIfUnmodified: isMain) { hotkey in
                 for command in binding.commands {
                     engine.execute(command)
                 }
-                guard repeatable else { return }
-                repeater.begin(hotkey) {
+                guard let interval else { return }
+                repeater.begin(hotkey, interval: interval) {
                     for command in binding.commands {
                         engine.execute(command)
                     }
@@ -357,10 +432,43 @@ func registerConfiguredHotkeys(_ bindings: [Binding]) {
             Log.shared.warn("\(binding.spec) を登録できなかった: \(error)")
         }
     }
-    Log.shared.info("設定から \(bound)/\(bindings.count) 個のホットキーを登録した")
+    Log.shared.info("[mode.\(mode)] から \(bound)/\(bindings.count) 個のホットキーを登録した")
 }
 
-registerConfiguredHotkeys(configuration.bindings)
+// MARK: - キーの層（モード）
+
+// i3 の `mode "resize"` に相当する層。**層の中では修飾キーなしのキーも奪う。**
+// それがモードの目的で、`h` だけでリサイズできるようになる。
+//
+// 抜けるキーを書き忘れると、修飾なしのキーを奪ったまま出られなくなる。
+// **`esc` は必ず戻れるようにしておく**（書いてあればそちらが勝つ）。
+var activeMode = Configuration.mainMode
+let escapeHotkey = try? KeySpec.parse("esc")
+
+@MainActor
+func activateMode(_ name: String) {
+    guard let bindings = configuration.modes[name] else {
+        Log.shared.warn("[mode.\(name)] が設定に無いので \(activeMode) のまま")
+        return
+    }
+    activeMode = name
+    repeater.stopAll()
+    hotkeyManager.unregisterAll()
+    registerConfiguredHotkeys(bindings, mode: name)
+    registerControlHotkeys()
+    if name != Configuration.mainMode,
+        let escapeHotkey, !bindings.contains(where: { $0.hotkey == escapeHotkey })
+    {
+        registerControlHotkey("esc", label: "モードを抜ける") {
+            activateMode(Configuration.mainMode)
+        }
+    }
+    if name != Configuration.mainMode {
+        Log.shared.info("モード: \(name)（esc で戻る）")
+    }
+}
+
+engine.onModeRequested = { activateMode($0) }
 
 // MARK: - 制御用ホットキー
 
@@ -392,6 +500,7 @@ func terminateAfterRestoringWindows(reason: String) {
     }
     repeater.stopAll()
     configWatcher.stop()
+    commandServer.stop()
     decoration.stop()
     let restored = engine.prepareForTermination()
     guard restored > 0 else {
@@ -401,6 +510,19 @@ func terminateAfterRestoringWindows(reason: String) {
     Log.shared.info("退避していた \(restored) 枚を画面へ戻してから終了する")
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
         NSApp.terminate(nil)
+    }
+}
+
+// `exit` コマンド（i3 の `exit`）も同じ後片付けを通す。
+//
+// **その場では終わらせない。** `--send exit` の応答を書く前にプロセスが死ぬと、
+// 送った側からは「失敗した」ように見える（実機で "応答が無い" になった）。
+// 次のランループへ回して、応答を書き終えてから片付ける。
+engine.onExitRequested = {
+    DispatchQueue.main.async {
+        MainActor.assumeIsolated {
+            terminateAfterRestoringWindows(reason: "exit コマンドを受信した")
+        }
     }
 }
 
@@ -432,7 +554,7 @@ func registerControlHotkeys() {
     }
 }
 
-registerControlHotkeys()
+activateMode(Configuration.mainMode)
 
 // MARK: - 設定のホットリロード
 
@@ -468,13 +590,19 @@ func reloadConfiguration() {
     engine.hiddenWindowStrategy = reloaded.hiddenWindowStrategy
     engine.focusCycleReset = reloaded.focusCycleReset
     engine.focusCycleScope = reloaded.focusCycleScope
+    engine.monitorScope = reloaded.monitorScope
+    engine.workspaceAutoBackAndForth = reloaded.workspaceAutoBackAndForth
+    engine.focusFollowsMouse = reloaded.focusFollowsMouse
+    engine.focusWrapping = reloaded.focusWrapping
     // 繰り返しの間隔は保存しただけで効く（`HotkeyRepeater` は値を見て待つだけ）。
     repeater.delay = reloaded.performance.repeatDelay
     repeater.interval = reloaded.performance.repeatInterval
 
     decoration.border.style = reloaded.border
+    decoration.tileBorders.style = reloaded.border
     decoration.indicator.style = reloaded.indicator
     decoration.indicator.hudDuration = reloaded.hudDuration
+    decoration.workspaceNames = reloaded.workspaceNames
     decoration.loadWallpapers(
         reloaded.wallpapers, directory: reloaded.wallpaperDirectory,
         workspaceCount: reloaded.workspaceCount)
@@ -501,10 +629,9 @@ func reloadConfiguration() {
     }
 
     // ホットキーは全解除して張り直す。差分を取るより確実。
-    repeater.stopAll()
-    hotkeyManager.unregisterAll()
-    registerConfiguredHotkeys(reloaded.bindings)
-    registerControlHotkeys()
+    // **今いた層が消えていたら既定へ戻す。** 消えた層に居続けると、
+    // どのキーも効かない状態のまま抜けられなくなる。
+    activateMode(reloaded.modes[activeMode] != nil ? activeMode : Configuration.mainMode)
 
     engine.configurationChanged()
 }
@@ -576,15 +703,29 @@ if !options.commands.isEmpty {
 
 // MARK: - シグナル
 
-// SIGINT を DispatchSource で受けるには既定ハンドラを無効化する必要がある。
-signal(SIGINT, SIG_IGN)
-let interruptSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
-interruptSource.setEventHandler {
-    MainActor.assumeIsolated {
-        terminateAfterRestoringWindows(reason: "SIGINT を受信した")
+// **SIGTERM を必ず受けること。** launchd の停止・ログアウト・`kill` は SIGTERM で
+// 来る。既定の動作（即死）だと、退避したウィンドウが画面外に残り、非表示にした
+// アプリも隠れたままになる。利用者から見れば「ウィンドウが消えた」だけで、
+// アプリのウィンドウメニューから呼び戻すしか手が無くなる。
+//
+// SIGHUP は端末が閉じたとき（`./build/.../comet` を前面で動かしていた場合）に来る。
+//
+// DispatchSource で受けるには既定ハンドラを無効化する必要がある。
+let terminationSignals: [(signal: Int32, name: String)] = [
+    (SIGINT, "SIGINT"), (SIGTERM, "SIGTERM"), (SIGHUP, "SIGHUP"),
+]
+var signalSources: [DispatchSourceSignal] = []
+for entry in terminationSignals {
+    signal(entry.signal, SIG_IGN)
+    let source = DispatchSource.makeSignalSource(signal: entry.signal, queue: .main)
+    source.setEventHandler {
+        MainActor.assumeIsolated {
+            terminateAfterRestoringWindows(reason: "\(entry.name) を受信した")
+        }
     }
+    source.resume()
+    signalSources.append(source)
 }
-interruptSource.resume()
 
 // MARK: - 実行
 

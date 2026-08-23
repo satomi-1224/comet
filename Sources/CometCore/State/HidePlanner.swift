@@ -60,11 +60,14 @@ public enum HidePlanner {
 
     /// - Parameters:
     ///   - windows: 位置を触りうるウィンドウ（タイルとフローティング）。
+    ///   - visibleWorkspaces: 今どこかのモニタに映っているワークスペース。
+    ///     **複数ある**（モニタ1台につき1つ）。1つだけと決め打つと、2画面のうち
+    ///     片方に映っているウィンドウまで隠してしまう。
     ///   - hiddenApps: 今 macOS 側で非表示になっているアプリ。
     ///     利用者が Cmd+Tab で戻した場合に追従するため、**自分の記録ではなく実態を渡す**。
     public static func plan(
         windows: [Window],
-        activeWorkspace: WorkspaceID,
+        visibleWorkspaces: Set<WorkspaceID>,
         hiddenApps: Set<pid_t>,
         strategy: HiddenWindowStrategy
     ) -> Plan {
@@ -82,7 +85,9 @@ public enum HidePlanner {
 
         for pid in order {
             guard let owned = grouped[pid] else { continue }
-            let hiddenHere = owned.filter { !$0.isAlwaysVisible && $0.workspace != activeWorkspace }
+            let hiddenHere = owned.filter {
+                !$0.isAlwaysVisible && !visibleWorkspaces.contains($0.workspace)
+            }
             let canHideApp =
                 strategy == .hideApp && !hiddenHere.isEmpty && hiddenHere.count == owned.count
 

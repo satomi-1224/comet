@@ -48,17 +48,52 @@ struct ConfigLoaderTests {
         #expect(commands["alt-shift-f"] == [.layout([.floating, .tiling])])
     }
 
-    // 後続 Phase のコマンドは既定に書いてあるが、まだ実行できない。落としたことを黙らない。
+    /// **既定設定に効かないバインドを置かない。** 置くと、起動のたびに
+    /// 「未対応」の行が出て、本当の設定間違いが埋もれる。
+    @Test("既定設定に未対応のコマンドは無い")
+    func theDefaultConfigurationHasNoUnsupportedCommands() throws {
+        let configuration = try ConfigLoader.parse(Configuration.defaultTOML)
+        let problems = configuration.problems.filter {
+            $0.kind == .unsupportedCommand || $0.kind == .invalidCommand
+        }
+        #expect(problems.isEmpty, "\(problems.map(\.detail))")
+    }
+
+    // 未対応のコマンドを書いたら、落としたことを黙らない。
     @Test("未対応のコマンドは問題として記録される")
     func unsupportedCommandsAreReported() throws {
-        let configuration = try ConfigLoader.parse(Configuration.defaultTOML)
+        let configuration = try ConfigLoader.parse(
+            """
+            [mode.main.binding]
+            alt-s = "macos-native-fullscreen"
+            alt-semicolon = "fullscreen"
+            """)
         let unsupported = configuration.problems.filter { $0.kind == .unsupportedCommand }
 
-        #expect(!unsupported.isEmpty, "move-node-to-monitor などが含まれるはず")
-        #expect(unsupported.contains { $0.detail.contains("move-node-to-monitor") })
+        #expect(unsupported.contains { $0.detail.contains("macos-native-fullscreen") })
         #expect(!configuration.bindings.contains { $0.spec == "alt-s" }, "登録はされない")
         // 実装済みのものは登録される。
         #expect(configuration.bindings.contains { $0.spec == "alt-semicolon" }, "fullscreen は実装済み")
+    }
+
+    /// i3 の綴りをそのまま書き写しても通ること。**指が覚えているほうで通らないと
+    /// 設定を持ってきた時点で無反応になる。**
+    @Test("既定設定は i3 の語彙を含む")
+    func theDefaultConfigurationCoversTheI3Vocabulary() throws {
+        let configuration = try ConfigLoader.parse(Configuration.defaultTOML)
+        let commands = Dictionary(
+            uniqueKeysWithValues: configuration.bindings.map { ($0.spec, $0.commands) })
+
+        #expect(commands["alt-enter"] == [.exec("open -a Terminal")])
+        #expect(commands["alt-b"] == [.split(.horizontal)])
+        #expect(commands["alt-v"] == [.split(.vertical)])
+        #expect(commands["alt-a"] == [.focusContainer(.parent)])
+        #expect(commands["alt-shift-a"] == [.focusContainer(.child)])
+        #expect(commands["alt-space"] == [.focusLayer(.toggle)])
+        #expect(commands["alt-period"] == [.workspace(.next)])
+        #expect(commands["alt-comma"] == [.workspace(.previous)])
+        #expect(commands["alt-shift-slash"] == [.flattenWorkspaceTree])
+        #expect(commands["alt-shift-q"] == [.closeWindow])
     }
 
     @Test("既定の設定はワークスペースのバインドを持つ")
@@ -71,7 +106,7 @@ struct ConfigLoaderTests {
         #expect(commands["alt-0"] == [.workspace(.index(10))])
         #expect(commands["alt-tab"] == [.workspace(.backAndForth)])
         #expect(
-            commands["alt-shift-3"] == [.moveNodeToWorkspace(3), .workspace(.index(3))],
+            commands["alt-shift-3"] == [.moveNodeToWorkspace(.index(3)), .workspace(.index(3))],
             "移動して追従する2連コマンド")
     }
 
@@ -424,11 +459,19 @@ struct ConfigLoaderTests {
         #expect(configuration.border.focusedColor == RGBAColor(hex: "#ff0000"))
     }
 
-    // 書いてあるのに効かない項目は黙って無視しない。
-    @Test("未対応の設定項目は問題として記録する")
-    func unsupportedOptionIsReported() throws {
+    @Test("フォーカスしていない枠線の色を読める")
+    func unfocusedBorderColorIsRead() throws {
         let configuration = try ConfigLoader.parse("[border]\ncolor-unfocused = \"#ffffff\"")
-        #expect(configuration.problems.contains { $0.kind == .unsupportedOption })
+        #expect(configuration.border.unfocusedColor == RGBAColor(hex: "#ffffff"))
+        #expect(configuration.border.drawsUnfocused)
+        #expect(!configuration.problems.contains { $0.kind == .invalidValue })
+    }
+
+    @Test("色を書かなければフォーカス中の1枚だけに枠を描く")
+    func unfocusedBorderIsOptional() throws {
+        let configuration = try ConfigLoader.parse("[border]\nwidth = 2.0")
+        #expect(configuration.border.unfocusedColor == nil)
+        #expect(!configuration.border.drawsUnfocused)
     }
 
     @Test("色を解釈できなければ既定に落として問題として記録する")
@@ -619,8 +662,8 @@ struct ConfigLoaderTests {
         #expect(configuration.problems.contains { $0.kind == .invalidCommand })
     }
 
-    @Test("main 以外のモードはまだ読まない")
-    func onlyTheMainModeIsRead() throws {
+    @Test("main 以外のモードも読む")
+    func otherModesAreRead() throws {
         let configuration = try ConfigLoader.parse(
             """
             [mode.main.binding]
@@ -631,7 +674,7 @@ struct ConfigLoaderTests {
             """)
 
         #expect(configuration.bindings.map(\.spec) == ["alt-h"])
-        #expect(configuration.problems.contains { $0.kind == .unsupportedMode })
+        #expect(configuration.modes["resize"]?.map(\.spec) == ["h"])
     }
 
     // MARK: - ウィンドウルール
@@ -673,7 +716,67 @@ struct ConfigLoaderTests {
             """
             [[window-rule]]
             if-app-id = "com.example.app"
+            run       = "close-window"
+            """)
+
+        #expect(configuration.windowRules.isEmpty)
+        #expect(configuration.problems.contains { $0.kind == .invalidRule })
+    }
+
+    // i3 の assign 相当。置き場所を固定できる。
+    @Test("run に move-node-to-workspace を書ける")
+    func ruleCanAssignWorkspace() throws {
+        let configuration = try ConfigLoader.parse(
+            """
+            [[window-rule]]
+            if-app-id = "com.example.app"
             run       = "move-node-to-workspace 3"
+            """)
+
+        #expect(!configuration.problems.contains { $0.kind == .invalidRule })
+        #expect(configuration.windowRules.count == 1)
+        #expect(configuration.windowRules[0].action == .moveToWorkspace(3))
+    }
+
+    @Test("行き先の番号が読めなければ問題として記録する")
+    func ruleWorkspaceMustBeANumber() throws {
+        let configuration = try ConfigLoader.parse(
+            """
+            [[window-rule]]
+            if-app-id = "com.example.app"
+            run       = "move-node-to-workspace web"
+            """)
+
+        #expect(configuration.windowRules.isEmpty)
+        #expect(configuration.problems.contains { $0.kind == .invalidRule })
+    }
+
+    @Test("タイトルを正規表現で判定できる")
+    func ruleCanUseRegex() throws {
+        let configuration = try ConfigLoader.parse(
+            """
+            [[window-rule]]
+            if-window-title-regex = "^Picture in Picture$"
+            run                   = "layout floating"
+            """)
+
+        #expect(!configuration.problems.contains { $0.kind == .invalidRule })
+        #expect(configuration.windowRules.count == 1)
+        #expect(configuration.windowRules[0].matches(bundleID: nil, title: "Picture in Picture"))
+        #expect(
+            !configuration.windowRules[0].matches(
+                bundleID: nil, title: "My Picture in Picture window"),
+            "^ と $ が効いている")
+    }
+
+    // 実行時に黙って空振りすると、当たらない理由が分からない。
+    @Test("解釈できない正規表現は読み込みのときに弾く")
+    func invalidRegexIsReported() throws {
+        let configuration = try ConfigLoader.parse(
+            """
+            [[window-rule]]
+            if-window-title-regex = "[unclosed"
+            run                   = "layout floating"
             """)
 
         #expect(configuration.windowRules.isEmpty)
@@ -717,5 +820,69 @@ struct ConfigLoaderTests {
     @Test("既定のパスは XDG の場所")
     func defaultPathIsUnderConfigHome() {
         #expect(ConfigLoader.defaultPath().hasSuffix("/comet/config.toml"))
+    }
+}
+
+/// キーの層（i3 の `mode "resize"`）。
+///
+/// **層の中では修飾キーなしのキーも奪う。** それが層の目的なので、
+/// 「修飾キーが無い」警告はここでは出さない（`main` だけで出す）。
+@Suite("キーの層")
+struct ModeTests {
+
+    @Test("複数の層を読める")
+    func multipleModesAreParsed() throws {
+        let configuration = try ConfigLoader.parse(
+            """
+            [mode.main.binding]
+            alt-r = "mode resize"
+
+            [mode.resize.binding]
+            h = "resize width -50"
+            esc = "mode main"
+            """)
+        #expect(configuration.modes.keys.sorted() == ["main", "resize"])
+        #expect(configuration.bindings.map(\.spec) == ["alt-r"])
+        #expect(configuration.bindings.first?.commands == [.mode("resize")])
+        #expect(configuration.modes["resize"]?.count == 2)
+        #expect(configuration.problems.isEmpty, "\(configuration.problems.map(\.detail))")
+    }
+
+    /// **行き先の無い層は押しても何も起きない。** 綴り間違いだと分かるようにする。
+    @Test("書かれていない層への移動は問題として記録する")
+    func unknownModeTargetsAreReported() throws {
+        let configuration = try ConfigLoader.parse(
+            """
+            [mode.main.binding]
+            alt-r = "mode resiz"
+            """)
+        #expect(
+            configuration.problems.contains {
+                $0.kind == .invalidCommand && $0.detail.contains("[mode.resiz]")
+            }, "\(configuration.problems.map(\.detail))")
+    }
+
+    @Test("既定設定はリサイズの層を持つ")
+    func theDefaultConfigurationHasAResizeMode() throws {
+        let configuration = try ConfigLoader.parse(Configuration.defaultTOML)
+        let resize = try #require(configuration.modes["resize"])
+        let commands = Dictionary(uniqueKeysWithValues: resize.map { ($0.spec, $0.commands) })
+
+        #expect(commands["h"] == [.resize(.width, delta: -50)])
+        #expect(commands["l"] == [.resize(.width, delta: 50)])
+        #expect(commands["esc"] == [.mode("main")])
+        #expect(commands["enter"] == [.mode("main")])
+        // 入り口が main 側にあること。無いと層へ行けない。
+        #expect(configuration.bindings.contains { $0.commands == [.mode("resize")] })
+    }
+
+    @Test("mode コマンドを解釈する")
+    func modeCommandIsParsed() throws {
+        #expect(try Command.parse("mode resize") == .mode("resize"))
+        // i3 は引用符付きで書く。書き写されても通す。
+        #expect(try Command.parse("mode \"resize\"") == .mode("resize"))
+        #expect(try Command.parse("mode resize").description == "mode resize")
+        #expect(throws: Command.ParseError.self) { try Command.parse("mode") }
+        #expect(throws: Command.ParseError.self) { try Command.parse("mode a b") }
     }
 }

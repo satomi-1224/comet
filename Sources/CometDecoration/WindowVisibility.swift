@@ -1,5 +1,7 @@
 import AppKit
 import CoreGraphics
+import Darwin
+import CometCore
 
 /// 枠線を出してよい状態かを、画面のウィンドウ一覧から判断する。
 ///
@@ -42,29 +44,38 @@ public enum WindowVisibility {
                 [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
                 as? [[String: Any]]
         else { return nil }
-        return parse(list, displaySizes: NSScreen.screens.map(\.frame.size))
+        return parse(
+            list, displaySizes: NSScreen.screens.map(\.frame.size),
+            dockPID: SystemOverlay.dockPID())
     }
 
     /// 一覧から状態を組み立てる。**判定はここに閉じてテストできるようにする。**
-    static func parse(_ list: [[String: Any]], displaySizes: [CGSize]) -> Screen {
+    static func parse(
+        _ list: [[String: Any]], displaySizes: [CGSize], dockPID: pid_t? = nil
+    ) -> Screen {
         var ids: Set<CGWindowID> = []
         ids.reserveCapacity(list.count)
-        var overlay = false
+        var dockSizes: [CGSize] = []
         for info in list {
             if let id = info[kCGWindowNumber as String] as? CGWindowID {
                 ids.insert(id)
             }
-            guard !overlay, (info[kCGWindowOwnerName as String] as? String) == "Dock",
+            // Dock のウィンドウを選ぶのは **PID で**。名前（`kCGWindowName`）の取得には
+            // 画面収録の権限が要り、comet はそれを要求しないので常に nil になる。
+            // 渡されないときだけ名前に頼る（テストは名前で書ける）。
+            let isDock =
+                dockPID.map { info[kCGWindowOwnerPID as String] as? pid_t == $0 }
+                ?? ((info[kCGWindowOwnerName as String] as? String) == "Dock")
+            guard isDock,
                 let bounds = info[kCGWindowBounds as String] as? [String: Any],
                 let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary)
             else { continue }
-            // Dock 本体は帯なので画面全体には一致しない。一致するのは
-            // Mission Control などが敷く覆いだけ（実測: レベル 18 と 20 の 2560x1664）。
-            overlay = displaySizes.contains {
-                abs($0.width - rect.width) < 2 && abs($0.height - rect.height) < 2
-            }
+            dockSizes.append(rect.size)
         }
-        return Screen(onScreen: ids, systemOverlayIsVisible: overlay)
+        return Screen(
+            onScreen: ids,
+            systemOverlayIsVisible: SystemOverlay.isVisible(
+                dockWindowSizes: dockSizes, displaySizes: displaySizes))
     }
 
     /// 枠線を出してよいか。

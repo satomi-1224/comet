@@ -62,6 +62,31 @@ public final class Engine: WindowResolving {
 
     /// レイアウトが定めた矩形。外部から動かされたときの戻し先になる。
     private var desiredFrames: [CGWindowID: CGRect] = [:]
+
+    /// 「これ以上は寄せられない」と分かった目標と、そのときの実際の矩形。
+    ///
+    /// **押し合いを終わらせるために要る。** 文字セル単位でしかリサイズできない
+    /// アプリ（端末など）は目標にぴったり収まらない。補正で諦めたあと、見張りが
+    /// 「ずれている」と判定してまた戻しに行くと、**20秒ごとに無駄な AX 往復を
+    /// 繰り返し続ける**（実機で 47 秒に 13 回、約 52 往復を観測）。
+    ///
+    /// 同じ目標に対して同じ実測へ落ち着いたなら、それがそのウィンドウの限界。
+    /// 落ち着いたものとして扱い、目標が変わったときだけ試し直す。
+    private var toleratedFrames: [CGWindowID: (target: CGRect, actual: CGRect)] = [:]
+
+    /// 利用者が選んだフローティング。**判定とは別に覚える。**
+    ///
+    /// 判定の結果（``WindowDisposition``）に混ぜると、最小化・サブディスプレイ・
+    /// Cmd+H から戻ってきたときに指定が消えてタイルへ戻ってしまう
+    ///（`.unmanaged(...)` を経由した時点でフローティングの記憶が失われる）。
+    private var floatingWindows: Set<CGWindowID> = []
+
+    /// comet 自身が非表示ワークスペースのために隠したアプリ。
+    ///
+    /// **利用者の Cmd+H と区別するために要る。** 区別しないと、利用者が隠した
+    /// アプリを次の再配置で勝手に表示へ戻してしまう（実機で Parsec が起動直後に
+    /// 表示へ戻された）。
+    private var cometHiddenApps: Set<pid_t> = []
     /// 外部変更への反応の頻度制限用。
     private var restoreAttempts: [CGWindowID: (since: Date, count: Int)] = [:]
 
@@ -90,7 +115,7 @@ public final class Engine: WindowResolving {
     ///
     /// **このときだけサイズの設定を省ける。** 通常の再配置でも省いてしまうと、
     /// 最小寸法の学習やギャップの変更で寸法が変わったときに反映されない。
-    private var isRestoringWorkspace = false
+    private var restoringWorkspaces: Set<WorkspaceID> = []
 
     /// 退避させたときの矩形。
     ///
@@ -100,10 +125,33 @@ public final class Engine: WindowResolving {
 
     /// 直近のレイアウト。動いた辺がどの分割の境界にあたるかの照合と、
     /// `resize` で点数を比率へ直すために使う。
-    private var lastLayout: LayoutEngine.Result?
+    /// 直近のレイアウト。ワークスペースごとに持つ。
+    ///
+    /// **2画面では同時に2つのレイアウトが生きている。** 1つしか持たないと、
+    /// 片方のモニタで縁をドラッグしたときに反対側のレイアウトと突き合わせて
+    /// 見当違いのコンテナを動かす。
+    private var lastLayouts: [WorkspaceID: LayoutEngine.Result] = [:]
 
     /// 今フォーカスされているウィンドウ。新規ウィンドウの挿入位置とコマンドの対象になる。
     private var focusedWindowID: CGWindowID?
+
+    /// フォーカスが指している階層。0 = ウィンドウ自身、1 = その親コンテナ、…
+    ///
+    /// i3 の `focus parent` / `focus child`。**入れ子をコンテナごと動かす・向きを変える**
+    /// にはこれが要る。`move` / `resize` / `layout` の対象がここで決まる。
+    ///
+    /// - Important: **本当にフォーカスが動いたら必ず 0 に戻す。** 戻さないと、
+    ///   次にウィンドウを選んだつもりでコンテナごと動いて驚く。
+    private var focusedAncestorDepth = 0
+
+    /// 次に開くウィンドウの入り方の予約（i3 の `split h` / `split v`）。
+    ///
+    /// **その場では木を変えない。** 子が1つのコンテナは正規化で潰されるので、
+    /// 作っても残らない。次の1枚が来たときに使う予約として持つ。
+    private var pendingSplit: (windowID: CGWindowID, orientation: Orientation)?
+
+    /// `exec` で起こしたプロセス。**終了まで参照を残して確実に回収する。**
+    private var launchedProcesses: [Process] = []
     /// フォーカスの新しさを比べるための単調増加値。時刻そのものは要らない。
     private var focusCounter: UInt64 = 0
 
@@ -125,6 +173,29 @@ public final class Engine: WindowResolving {
     /// 画面外退避方式では Cmd+Tab や Dock から非表示のウィンドウを選べてしまい、
     /// 「アプリは前面だがウィンドウが見えない」状態になる。
     public var focusFollowsActivation = true
+
+    /// 表示中のワークスペースの番号をもう一度押したら直前へ戻るか
+    ///（i3 の `workspace_auto_back_and_forth`）。
+    public var workspaceAutoBackAndForth = false
+
+    /// マウスポインタが乗ったウィンドウへフォーカスを移すか（i3 の `focus_follows_mouse`）。
+    ///
+    /// **i3 の既定は有効**だが、comet では無効を既定にしている。macOS はクリックで
+    /// フォーカスを移す前提で作られており、乗せただけで前面が変わると
+    /// 「触っていないのにウィンドウが入れ替わる」と受け取られやすい。
+    /// 方向フォーカスが端で反対側へ回るか（i3 の `focus_wrapping`）。
+    ///
+    /// **i3 の既定は有効**だが、comet では無効を既定にしている。回ると
+    /// 「右端で `right` を押したら左端へ飛ぶ」ことになり、どこへ行くのかが
+    /// 押す前に読めない。2枚だけ並べているときの往復が欲しい人向けの設定。
+    public var focusWrapping = false
+
+    public var focusFollowsMouse = false {
+        didSet {
+            guard focusFollowsMouse != oldValue else { return }
+            focusFollowsMouse ? startMouseTracking() : stopMouseTracking()
+        }
+    }
     /// アプリ巡回で「続けて押している」とみなす時間。0 なら毎回組み直す。
     public var focusCycleReset: TimeInterval = 1.5
     /// 巡回の対象範囲。
@@ -138,11 +209,32 @@ public final class Engine: WindowResolving {
     /// フォーカス先が無いときは `nil`。
     public var onFocusedFrameChanged: (@MainActor (FocusedWindow?) -> Void)?
 
-    /// 表示するワークスペースが変わったときに呼ばれる。
+    /// フォーカスしていないタイルの矩形が変わったときに呼ばれる。
+    ///
+    /// **フォーカス中の1枚は含めない**（そちらは ``onFocusedFrameChanged`` が受ける）。
+    /// 二重に描くと色が混ざる。
+    public var onTiledFramesChanged: (@MainActor ([(id: CGWindowID, frame: CGRect)]) -> Void)?
+
+    /// ワークスペースの見え方が変わったときに呼ばれる。
     ///
     /// **ウィンドウ移動の発行より前に呼ぶ。** 壁紙とインジケータは自プロセス側の
     /// 処理なので即座に終わり、切替が速く見える（症状D）。
-    public var onWorkspaceChanged: (@MainActor (WorkspaceID) -> Void)?
+    ///
+    /// 2画面では壁紙もインジケータもモニタごとに違うので、「今のワークスペース」
+    /// 1つでは表せない。**どの番号にウィンドウが居るか**も渡す（i3 のバーと
+    /// 同じ見え方にするために要る）。
+    public var onWorkspaceStatusChanged: (@MainActor (WorkspaceStatus) -> Void)?
+
+    /// 並べる対象のディスプレイ。既定は全部（i3 は全ての output をタイルする）。
+    public var monitorScope: MonitorScope = .all {
+        didSet {
+            guard monitorScope != oldValue else { return }
+            syncMonitorAssignment()
+            workspaces.markAllLayoutsDirty()
+            relayout()
+        }
+    }
+    private var managesAllMonitors: Bool { monitorScope == .all }
     /// 追従を諦めたウィンドウをフローティングへ降格させる、ずれの下限。
     ///
     /// 文字セル単位への丸め（WezTerm）や最小寸法は数十 pt のずれで収まる。
@@ -195,6 +287,97 @@ public final class Engine: WindowResolving {
     }
     public var isTimingEnabled: Bool { scheduler.timing.isEnabled }
 
+    /// ワークスペースの一覧。**状態バーから読める形にする。**
+    ///
+    /// 1行1ワークスペースの `key=value` 形式。空のワークスペースは省く
+    /// （10 個並べても押す手掛かりにならない）。
+    ///
+    /// ```
+    /// ws=1 state=focused monitor=1 windows=3
+    /// ws=2 state=visible monitor=2 windows=1
+    /// ws=5 state=hidden windows=2
+    /// ```
+    public var workspacesDescription: String {
+        let occupied = occupiedWorkspaces
+        var lines: [String] = []
+        for workspace in workspaces.all {
+            let monitor = workspaces.monitor(showing: workspace.id)
+            guard occupied.contains(workspace.id) || monitor != nil else { continue }
+            let state: String
+            if workspace.id == workspaces.activeID {
+                state = "focused"
+            } else if monitor != nil {
+                state = "visible"
+            } else {
+                state = "hidden"
+            }
+            var parts = ["ws=\(workspace.id)", "state=\(state)"]
+            if let monitor { parts.append("monitor=\(monitor)") }
+            parts.append("windows=\(registry.visibleIDs(in: workspace.id).count)")
+            lines.append(parts.joined(separator: " "))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// ウィンドウの一覧。**title は空白を含むので必ず最後に置く。**
+    public var windowsDescription: String {
+        let focused = focusedWindowID
+        return registry.allIDs.compactMap { id -> String? in
+            guard let record = registry[id] else { return nil }
+            let kind: String
+            switch record.disposition {
+            case .tiled: kind = "tiled"
+            case .floating: kind = "floating"
+            case .unmanaged(let reason): kind = "unmanaged(\(reason))"
+            }
+            let frame = desiredFrames[id] ?? record.observedFrame
+            var parts = [
+                "id=\(id)", "pid=\(record.pid)", "ws=\(record.workspace)", "kind=\(kind)",
+                "focus=\(id == focused ? "*" : "-")",
+            ]
+            if let frame {
+                parts.append(
+                    "frame=\(Int(frame.minX)),\(Int(frame.minY)),"
+                        + "\(Int(frame.width))x\(Int(frame.height))")
+            }
+            parts.append("app=\(record.bundleID ?? "-")")
+            // 改行が入ると1行1ウィンドウが崩れる。潰しておく。
+            let title = (record.title ?? "").replacingOccurrences(of: "\n", with: " ")
+            parts.append("title=\(title)")
+            return parts.joined(separator: " ")
+        }.joined(separator: "\n")
+    }
+
+    /// ディスプレイの一覧。**2画面の設定を状態バーから読むために要る。**
+    ///
+    /// ```
+    /// monitor=1 x=0 y=0 w=1920 h=1080 primary=yes ws=1 focused=yes
+    /// ```
+    public var monitorsDescription: String {
+        monitors.monitors.map { monitor in
+            let shown = workspaces.shown(on: monitor.id)
+            return [
+                "monitor=\(monitor.id)",
+                "x=\(Int(monitor.frame.minX))", "y=\(Int(monitor.frame.minY))",
+                "w=\(Int(monitor.frame.width))", "h=\(Int(monitor.frame.height))",
+                "primary=\(monitor.isPrimary ? "yes" : "no")",
+                "ws=\(shown.map(String.init) ?? "-")",
+                "focused=\(monitor.id == workspaces.focusedMonitor ? "yes" : "no")",
+            ].joined(separator: " ")
+        }.joined(separator: "\n")
+    }
+
+    /// 全ワークスペースのツリー。空のものは省く。
+    public var treesDescription: String {
+        workspaces.all.compactMap { workspace -> String? in
+            guard !workspace.root.isEmpty else { return nil }
+            let mark =
+                workspace.id == workspaces.activeID
+                ? "*" : (workspaces.isVisible(workspace.id) ? "+" : " ")
+            return "ws\(workspace.id)\(mark) \(workspace.root)"
+        }.joined(separator: "\n")
+    }
+
     /// 全ワークスペースの状態。**配置がおかしいときの最初の手がかり。**
     ///
     /// 「ツリーの組み方」「所属ワークスペース」「退避の有無」のどこがずれているのかを
@@ -208,7 +391,9 @@ public final class Engine: WindowResolving {
             }
             guard !tiled.isEmpty || !floating.isEmpty else { continue }
 
-            let mark = workspace.id == workspaces.activeID ? "*" : ""
+            let mark =
+                workspace.id == workspaces.activeID
+                ? "*" : (workspaces.isVisible(workspace.id) ? "+" : "")
             var part = "ws\(workspace.id)\(mark) \(workspace.root)"
             if !floating.isEmpty {
                 part += " float\(floating)"
@@ -240,6 +425,7 @@ public final class Engine: WindowResolving {
         monitors.onChange = { [weak self] in
             guard let self else { return }
             self.log.info("ディスプレイ構成が変わった")
+            self.syncMonitorAssignment()
             // 表示中でないワークスペースも寸法が合わなくなる。退避先も動くので、
             // **退避中のウィンドウを新しい退避先へ動かし直さないと画面に現れる**
             // 再配置が全ワークスペース分を積み直す。
@@ -247,6 +433,7 @@ public final class Engine: WindowResolving {
             self.relayout()
         }
         monitors.start()
+        syncMonitorAssignment()
 
         observerHub.onEvent = { [weak self] event in
             self?.handle(event)
@@ -258,6 +445,7 @@ public final class Engine: WindowResolving {
     }
 
     public func stop() {
+        stopMouseTracking()
         layoutGuardTimer?.invalidate()
         layoutGuardTimer = nil
         observerHub.stop()
@@ -268,7 +456,7 @@ public final class Engine: WindowResolving {
             TreeSync.reconcile(root: workspace.root, tiled: [], normalization: normalization)
         }
         stashedFrames.removeAll()
-        lastLayout = nil
+        lastLayouts.removeAll()
         focusedWindowID = nil
     }
 
@@ -297,6 +485,64 @@ public final class Engine: WindowResolving {
                 self?.forget(pid: info.pid)
             }
         }
+
+        // **Cmd+H を最小化と同じ扱いにするために要る。**
+        // 隠されたことを知らないと、領域だけ確保されて配置に穴が開き、
+        // 次の再配置では逆に勝手に表示へ戻してしまう（実機で観測）。
+        center.addObserver(
+            forName: NSWorkspace.didHideApplicationNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let info = AppInfo(notification: note) else { return }
+            MainActor.assumeIsolated {
+                self?.applicationDidHide(pid: info.pid, name: info.name)
+            }
+        }
+
+        center.addObserver(
+            forName: NSWorkspace.didUnhideApplicationNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let info = AppInfo(notification: note) else { return }
+            MainActor.assumeIsolated {
+                self?.applicationDidUnhide(pid: info.pid, name: info.name)
+            }
+        }
+    }
+
+    /// アプリが隠された。
+    ///
+    /// comet 自身が隠したぶんは何もしない。利用者が隠したなら、そのアプリの
+    /// ウィンドウを列から外して残りを詰める（最小化と同じ扱い）。
+    private func applicationDidHide(pid: pid_t, name: String?) {
+        guard !cometHiddenApps.contains(pid) else { return }
+        let affected = registry.ids(pid: pid).filter {
+            registry[$0]?.disposition.acceptsFocusTracking == true
+        }
+        guard !affected.isEmpty else { return }
+
+        log.info("\(name ?? "?") が隠された（Cmd+H）。\(affected.count) 枚を配置から外す")
+        for id in affected {
+            registry.update(id) { $0.disposition = .unmanaged(.userHidden) }
+            desiredFrames.removeValue(forKey: id)
+            toleratedFrames.removeValue(forKey: id)
+            layoutGuard.forget(id)
+            scheduler.forget(id)
+            if focusedWindowID == id {
+                focusedWindowID = nil
+            }
+        }
+        relayout()
+    }
+
+    /// アプリが表示に戻った。隠していた間に外したウィンドウを拾い直す。
+    private func applicationDidUnhide(pid: pid_t, name: String?) {
+        cometHiddenApps.remove(pid)
+        let restored = registry.ids(pid: pid).filter {
+            registry[$0]?.disposition == .unmanaged(.userHidden)
+        }
+        guard !restored.isEmpty else { return }
+        log.info("\(name ?? "?") が表示に戻った。\(restored.count) 枚を配置へ戻す")
+        // 隠れている間に属性が変わっていることがあるので、走査で読み直す。
+        rescan(pid: pid)
     }
 
     private func adoptRunningApplications() {
@@ -437,7 +683,12 @@ public final class Engine: WindowResolving {
             stashedFrames.removeValue(forKey: id)
             priorityWindows.remove(id)
             restoreAttempts.removeValue(forKey: id)
+            toleratedFrames.removeValue(forKey: id)
+            floatingWindows.remove(id)
+            layoutGuard.forget(id)
+            missingWindows.forget(id)
         }
+        cometHiddenApps.remove(pid)
         observerHub.detach(pid: pid)
         applierPool.removeQueue(for: pid)
 
@@ -447,39 +698,99 @@ public final class Engine: WindowResolving {
 
     // MARK: - ウィンドウの登録
 
-    /// 判定結果に、フローティング指定を重ねる。
+    /// 判定結果に、こちら側が持っている事情を重ねる。
     ///
-    /// 判定（``WindowClassifier``）が見ているのは「そもそも管理できるか」で、
-    /// フローティングは「管理下に置くが並べない」という選択。混ぜると、
-    /// 最小化から戻ったときにフローティング指定が消えてタイルへ戻ってしまう。
+    /// 判定（``WindowClassifier``）が見ているのは「そもそも管理できるか」だけ。
+    /// 隠されているか、どのディスプレイに居るか、利用者がフローティングを選んだかは
+    /// AX からは分からないのでここで重ねる。
+    ///
+    /// - Important: **フローティングの選択は ``floatingWindows`` が唯一の正。**
+    ///   判定結果に混ぜると、最小化・サブディスプレイ・Cmd+H を経由した時点で
+    ///   `.unmanaged(...)` に上書きされて記憶が失われ、戻ってきたときに
+    ///   タイルへ化ける。
     ///
     /// ルールを当てるのは**初めて見るウィンドウのときだけ**。あとから当て直すと
     /// `layout floating tiling` で戻した選択を上書きしてしまう。
     private func resolveDisposition(
-        _ classified: WindowDisposition, id: CGWindowID, bundleID: String?, title: String?,
-        frame: CGRect?
+        _ classified: WindowDisposition, id: CGWindowID, pid: pid_t, bundleID: String?,
+        title: String?, frame: CGRect?
     ) -> WindowDisposition {
-        // **メインディスプレイの外なら何もしない。** タイルもフローティングも
-        // 位置を触る対象なので、その手前で外す（フローティングは切替時に隅寄せされる）。
-        // 判断できないときは従来どおり管理する（`isOutsideMain` を参照）。
-        if let frame, MonitorManager.isOutsideMain(frame, monitors: monitors.monitors) {
+        // **利用者が Cmd+H で隠したアプリのウィンドウは列から外す。**
+        // 外さないと、隠れているのに領域だけ確保されて配置に穴が開き、
+        // 次の再配置では逆に勝手に表示へ戻される（実機で観測）。
+        // comet 自身が非表示ワークスペースのために隠したものは対象外。
+        if isUserHidden(pid: pid) {
+            return .unmanaged(.userHidden)
+        }
+        // 全モニタを並べる設定（既定）ではここで外さない。切っている場合だけ、
+        // メインの外にあるウィンドウを素の macOS へ返す（従来の挙動）。
+        if !managesAllMonitors, let frame,
+            MonitorManager.isOutsideMain(frame, monitors: monitors.monitors)
+        {
             return .unmanaged(.otherMonitor)
         }
         guard classified.isTiled else { return classified }
 
-        if let known = registry[id]?.disposition {
-            return known.isFloating ? .floating : classified
-        }
+        if floatingWindows.contains(id) { return .floating }
+        // 既知のウィンドウにルールを当て直さない。
+        guard registry[id] == nil else { return classified }
         let matched = windowRules.first {
             $0.action == .float && $0.matches(bundleID: bundleID, title: title)
         }
         guard matched != nil else { return classified }
         log.debug("[\(id)] \(title?.prefix(40) ?? "?") はルールによりフローティング")
+        floatingWindows.insert(id)
         return .floating
     }
 
+    /// 利用者がアプリごと隠しているか（Cmd+H）。
+    ///
+    /// comet 自身が隠したものは含めない。区別しないと、ワークスペース切替のために
+    /// 隠したウィンドウまで「利用者が隠した」と見なして列から外してしまう。
+    private func isUserHidden(pid: pid_t) -> Bool {
+        guard !cometHiddenApps.contains(pid) else { return false }
+        return NSRunningApplication(processIdentifier: pid)?.isHidden == true
+    }
+
+    /// 新しいウィンドウをどのモニタのワークスペースへ入れるか。
+    public enum Placement: Sendable {
+        /// 今フォーカスしているモニタ。**新しく開いたウィンドウはこちら**
+        ///（i3 と同じ。アプリが決めた初期位置に引っ張られない）。
+        case focusedMonitor
+        /// 今いる位置のモニタ。**起動時の走査はこちら**（既存の置き場所を尊重する）。
+        case byPosition
+    }
+
+    private func workspaceForNewWindow(frame: CGRect?, placement: Placement) -> WorkspaceID {
+        guard placement == .byPosition, let frame, let monitor = monitors.owner(of: frame),
+            let shown = workspaces.shown(on: monitor.id)
+        else {
+            return workspaces.activeID
+        }
+        return shown
+    }
+
+    /// ルールで決められた置き場所（i3 の `assign`）。
+    ///
+    /// **初めて見るウィンドウにだけ効く。** 呼び出し側が既知かどうかを判断する。
+    /// 番号が存在しない場合は無視する（設定の数を減らしたときに行き場を失わせない）。
+    private func ruleWorkspace(bundleID: String?, title: String?) -> WorkspaceID? {
+        for rule in windowRules {
+            guard case .moveToWorkspace(let id) = rule.action,
+                rule.matches(bundleID: bundleID, title: title)
+            else { continue }
+            guard workspaces[id] != nil else {
+                log.warn("ルールの行き先 ws\(id) は存在しない（1〜\(workspaces.count)）")
+                return nil
+            }
+            return id
+        }
+        return nil
+    }
+
     private func register(
-        _ windows: [DiscoveredWindow], pid: pid_t, bundleID: String?, immediately: Bool = false
+        _ windows: [DiscoveredWindow], pid: pid_t, bundleID: String?, immediately: Bool = false,
+        placement: Placement = .byPosition
     ) {
         guard !windows.isEmpty else { return }
 
@@ -497,14 +808,17 @@ public final class Engine: WindowResolving {
                         isMinimized: window.attributes.isMinimized,
                         size: window.attributes.size ?? .zero,
                         layer: screen?[window.id]?.layer)),
-                id: window.id, bundleID: bundleID, title: window.attributes.title,
+                id: window.id, pid: pid, bundleID: bundleID, title: window.attributes.title,
                 frame: window.attributes.frame)
 
             elements[window.id] = window.element
             idsByElement[window.element] = window.id
             // 新しいウィンドウは今見えているワークスペースに入る。既知のウィンドウは
             // 所属を保つ（属性の更新で別のワークスペースへ飛ばさない）。
-            let workspace = registry[window.id]?.workspace ?? workspaces.activeID
+            //
+            // **フォーカス履歴も引き継ぐ。** 走査は取りこぼしの拾い直しや Cmd+H からの
+            // 復帰でも走るので、捨てるとアプリ巡回の並びが走査のたびに初期化される。
+            let known = registry[window.id]
             registry.insert(
                 WindowRecord(
                     id: window.id,
@@ -513,7 +827,12 @@ public final class Engine: WindowResolving {
                     title: window.attributes.title,
                     bundleID: bundleID,
                     observedFrame: window.attributes.frame,
-                    workspace: workspace))
+                    workspace: known?.workspace
+                        ?? ruleWorkspace(
+                            bundleID: bundleID, title: window.attributes.title)
+                        ?? workspaceForNewWindow(
+                            frame: window.attributes.frame, placement: placement),
+                    lastFocusedAt: known?.lastFocusedAt ?? 0))
 
             observerHub.observe(window: window.element, pid: pid)
 
@@ -581,7 +900,6 @@ public final class Engine: WindowResolving {
             Task { @MainActor in
                 guard let id else { return }
                 self.noteFocused(id)
-                self.followActivationIfNeeded(id)
             }
         }
     }
@@ -591,11 +909,37 @@ public final class Engine: WindowResolving {
     /// 画面外退避方式では Cmd+Tab や Dock から非表示のウィンドウを選べてしまう。
     /// 何もしないと「アプリは前面だがウィンドウが見えない」状態になる。
     private func followActivationIfNeeded(_ id: CGWindowID) {
-        guard focusFollowsActivation,
-            let workspace = registry[id]?.workspace,
-            workspace != workspaces.activeID,
-            workspaces[workspace] != nil
+        // **切り替えた直後は追従しない。**
+        //
+        // 非表示ワークスペースのアプリを隠すと、macOS は残ったアプリのどれかを
+        // 前面にする。それが**今まさに隠したアプリ自身**だと、macOS が表示へ戻して
+        // しまい「非表示ワークスペースのウィンドウがアクティブになった」と読める。
+        // 追従すると切り替えたそばから元へ引き戻される。
+        //
+        // 実機で観測: `workspace 2` の 39ms 後に ws1 へ戻り、隠したアプリも
+        // 表示へ戻っていた（切替が効かないように見える）。
+        //
+        // 利用者が番号を押した意図は「そこへ行く」なので、**こちらが原因で起きた
+        // 前面化には従わない**。猶予を過ぎたあとの Cmd+Tab には普通に追従する。
+        let sinceSwitch = ProcessInfo.processInfo.systemUptime - lastWorkspaceSwitchAt
+        guard sinceSwitch > Self.activationFollowGrace else {
+            log.trace("[\(id)] のアクティブ化は切替の直後なので追従しない")
+            return
+        }
+        guard focusFollowsActivation, let record = registry[id],
+            // **どのワークスペースの配置にも属さないウィンドウでは切り替えない。**
+            // サブディスプレイのウィンドウ（`manage = "main"` のとき）は
+            // 所属ワークスペースに関係なく常に見えているので、隠すも出すも無い。
+            //
+            // これを見ないと実機で往復が起きた: 空のワークスペースへ切り替える →
+            // アプリを隠す → macOS がサブディスプレイのウィンドウを前面にする →
+            // その所属ワークスペース（元の側）へ引き戻される、で**切り替えた
+            // そばから元へ戻る**。
+            record.disposition.isTiled || record.disposition.isFloating,
+            !workspaces.isVisible(record.workspace),
+            workspaces[record.workspace] != nil
         else { return }
+        let workspace = record.workspace
 
         log.info("[\(id)] がアクティブになったのでワークスペース \(workspace) へ移る")
         switchWorkspace(to: .index(workspace))
@@ -610,13 +954,42 @@ public final class Engine: WindowResolving {
             log.trace("[\(id)] は管理対象外なのでフォーカスを移さない")
             return
         }
+        // **隠れているアプリのウィンドウは対象にしない。**
+        //
+        // `app.hide()` の直後にそのアプリのフォーカス通知が届く。反応すると
+        // 見えていないウィンドウがコマンドの対象になり、`focus-follows-activation`
+        // が働いて**切り替えたそばから元のワークスペースへ引き戻される**
+        //（実機で観測: 空のワークスペースへ切り替えた 46ms 後に戻っていた）。
+        //
+        // 利用者が Cmd+Tab で選んだ場合は macOS が先に表示へ戻すので、
+        // そのときは `isHidden` が false になっていて普通に追従する。
+        guard NSRunningApplication(processIdentifier: record.pid)?.isHidden != true else {
+            log.trace("[\(id)] は隠れているアプリのウィンドウなのでフォーカスを移さない")
+            return
+        }
+        // **階層の選択は本当のフォーカス移動で解除する。** i3 も同じで、
+        // 別のウィンドウを選んだ時点で親コンテナの選択は無くなる。
+        if focusedWindowID != id {
+            focusedAncestorDepth = 0
+            if pendingSplit?.windowID != id {
+                pendingSplit = nil
+            }
+        }
         focusedWindowID = id
         focusCounter += 1
         root.findWindow(id)?.lastFocusedAt = focusCounter
         // ツリーの葉はタイル対象しか持たない。アプリ巡回はフローティングや
         // サブディスプレイのウィンドウも対象にするので台帳側にも記録する。
         registry.update(id) { $0.lastFocusedAt = self.focusCounter }
+        followFocusedMonitor(id)
         notifyFocusedFrame()
+        // フォーカスが移ると「囲まない1枚」が変わる。
+        notifyTiledFrames()
+        // **どの経路でフォーカスが移っても追従する。** アプリのアクティブ化の
+        // 通知だけを見ていると、同じアプリの中で別ワークスペースのウィンドウへ
+        // 移ったとき（`focus next-window-in-app` や cycle-scope = "all"）に
+        // 通知が来ないため、「フォーカスはあるのに画面に無い」状態になる。
+        followActivationIfNeeded(id)
     }
 
     /// 枠線の位置を伝える。
@@ -639,7 +1012,10 @@ public final class Engine: WindowResolving {
             return
         }
         let override = measured?.id == id ? measured?.frame : nil
-        guard let frame = override ?? desiredFrames[id] ?? record.observedFrame else {
+        // `focus parent` で上がっているならコンテナ全体を囲む（i3 と同じ見え方）。
+        guard let frame = focusedContainerFrame() ?? override ?? desiredFrames[id]
+            ?? record.observedFrame
+        else {
             handler(nil)
             return
         }
@@ -653,6 +1029,32 @@ public final class Engine: WindowResolving {
         handler(FocusedWindow(id: id, frame: frame))
     }
 
+    /// フォーカスしていないタイルの矩形を伝える。
+    ///
+    /// 覆われているものは外す。枠線は自プロセスのウィンドウで**他のアプリより手前**に
+    /// 出るので、覆われた場所に残すと全画面や浮いているウィンドウの上に線が浮く。
+    private func notifyTiledFrames() {
+        guard let handler = onTiledFramesChanged else { return }
+        let focused = focusedWindowOnActiveWorkspace()
+        var frames: [(id: CGWindowID, frame: CGRect)] = []
+        for pair in workspaces.visiblePairs {
+            // 全画面が出ている間は他のタイルが隠れている。1枚も描かない。
+            guard pair.workspace.fullscreenWindowID == nil else { continue }
+            // 浮いているウィンドウは手前にある。重なっているタイルの枠は描かない。
+            let floating = registry.visibleIDs(in: pair.workspace.id).compactMap {
+                id -> CGRect? in
+                guard registry[id]?.disposition.isFloating == true else { return nil }
+                return registry[id]?.observedFrame
+            }
+            for id in registry.tiledIDs(in: pair.workspace.id) where id != focused {
+                guard let frame = desiredFrames[id] else { continue }
+                guard !floating.contains(where: { $0.intersects(frame) }) else { continue }
+                frames.append((id: id, frame: frame))
+            }
+        }
+        handler(frames)
+    }
+
     /// コマンドの対象になるウィンドウノード。
     ///
     /// フォーカスが分からない状況（起動直後など）では、最後にフォーカスされた葉に落とす。
@@ -662,6 +1064,31 @@ public final class Engine: WindowResolving {
         return TreeOperations.descendToLeaf(root)
     }
 
+    /// コマンドの対象ノード。`focus parent` で上がっていればコンテナ。
+    ///
+    /// i3 と同じく、`move` / `resize` / `layout` はここが返すノードに対して働く。
+    private func focusedTarget() -> Node? {
+        guard let window = focusedNode() else { return nil }
+        var node: Node = window
+        for _ in 0..<focusedAncestorDepth {
+            guard let parent = node.parent else { break }
+            node = parent
+        }
+        return node
+    }
+
+    /// `focus parent` で選んでいるコンテナが占める矩形。
+    ///
+    /// **枠線をここへ出さないと、何を選んでいるのかが分からない。**
+    /// コンテナの領域は葉の矩形の外接矩形と一致する。
+    private func focusedContainerFrame() -> CGRect? {
+        guard focusedAncestorDepth > 0, let container = focusedTarget() as? ContainerNode
+        else { return nil }
+        let rects = container.windowIDs.compactMap { desiredFrames[$0] }
+        guard let first = rects.first else { return nil }
+        return rects.dropFirst().reduce(first) { $0.union($1) }
+    }
+
     /// 「フォーカス中のウィンドウ」を対象にするコマンドの対象。
     ///
     /// **表示中のワークスペースのものに限る。** Cmd+Tab で非表示ワークスペースの
@@ -669,6 +1096,12 @@ public final class Engine: WindowResolving {
     /// そのまま対象にすると、見えていないウィンドウが動いて何が起きたか分からなくなる。
     private func focusedWindowOnActiveWorkspace() -> CGWindowID? {
         if let id = focusedWindowID, registry[id]?.workspace == workspaces.activeID {
+            return id
+        }
+        // フォーカスが別のモニタのワークスペースにあるなら、そこを対象にする。
+        if let id = focusedWindowID, let workspace = registry[id]?.workspace,
+            workspaces.isVisible(workspace)
+        {
             return id
         }
         return focusedNode()?.windowID
@@ -701,30 +1134,93 @@ public final class Engine: WindowResolving {
 
         switch command {
         case .focus(let direction):
-            guard let node = focusedNode() else { return }
-            guard let target = TreeOperations.focusTarget(from: node, direction: direction) else {
+            guard let node = focusedTarget() else { return }
+            guard
+                let target = TreeOperations.focusTarget(
+                    from: node, direction: direction, wrapping: focusWrapping)
+            else {
                 log.trace("フォーカスの行き先が無い: \(direction.rawValue)")
                 return
             }
             focusWindow(target.windowID)
 
         case .move(let direction):
-            guard let node = focusedNode(),
+            // **フローティングは列に居ないので入れ替えられない。** ツリーを触ると
+            // 関係のないウィンドウが動く（実際にそうなっていた）。点数で動かす。
+            if let floating = focusedFloatingWindow() {
+                nudgeFloating(floating, by: direction.offset(points: Self.floatingMoveStep))
+                return
+            }
+            guard let node = focusedTarget(),
                 TreeOperations.move(node, direction: direction)
             else { return }
             relayout()
+
+        case .moveBy(let direction, let points):
+            // 点数が効くのはフローティングだけ。タイルは i3 と同じく点数を無視して
+            // 列の中で入れ替わる。
+            if let floating = focusedFloatingWindow() {
+                nudgeFloating(floating, by: direction.offset(points: points))
+                return
+            }
+            guard let node = focusedTarget(),
+                TreeOperations.move(node, direction: direction)
+            else { return }
+            relayout()
+
+        case .movePosition(.center):
+            guard let floating = focusedFloatingWindow() else {
+                log.debug("move position が効くのはフローティングのウィンドウだけ")
+                return
+            }
+            centerFloating(floating)
+
+        case .balanceSizes:
+            // `focus parent` で上げていればその中だけ、上げていなければ全体。
+            let target: Node = focusedAncestorDepth > 0 ? (focusedTarget() ?? root) : root
+            guard TreeOperations.balance(target) else {
+                log.debug("分割の比率は既に均等")
+                return
+            }
+            workspaces.active.isLayoutDirty = true
+            log.info("分割の比率を均等に戻した")
+            relayout()
+
+        case .gaps(let change):
+            gaps = change.applied(to: gaps)
+            log.info(
+                "間隔: 内側 \(Int(gaps.innerHorizontal))x\(Int(gaps.innerVertical)) / "
+                    + "外周 上\(Int(gaps.outerTop)) 下\(Int(gaps.outerBottom)) "
+                    + "左\(Int(gaps.outerLeft)) 右\(Int(gaps.outerRight))"
+                    + "（設定ファイルは書き換えない。読み直すと戻る）")
+            workspaces.markAllLayoutsDirty()
+            relayout()
+
+        case .moveMouse(let target):
+            moveMouse(target)
 
         case .resize(let dimension, let delta):
             // 点数を比率へ直すには「そのコンテナが配分できる長さ」が要る。
             // `lastLayout` は再配置が非同期なので、直前に木を変えるコマンド
             //（join-with 等）を打たれていると新しいコンテナを知らない。
             // レイアウトは純粋計算なので、ここで作り直すのが確実で安い。
-            guard let node = focusedNode(), let layout = currentLayout(),
+            //
+            // **フローティングは分割の境界を持たない。** 境界を探しに行くと関係のない
+            // コンテナの比率が動く。自分の寸法を直接変える。
+            if let floating = focusedFloatingWindow() {
+                resizeFloating(floating, dimension: dimension, delta: delta)
+                return
+            }
+            guard let node = focusedTarget(), let layout = currentLayout(),
                 TreeOperations.resize(node, dimension: dimension, delta: delta, layout: layout)
             else { return }
             relayout()
 
         case .joinWith(let direction):
+            guard focusedFloatingWindow() == nil else {
+                log.debug("フローティングのウィンドウは join-with の対象にならない")
+                return
+            }
             guard let node = focusedNode(),
                 TreeOperations.joinWith(node, direction: direction)
             else { return }
@@ -749,11 +1245,256 @@ public final class Engine: WindowResolving {
             }
             handler()
 
-        case .fullscreen:
-            toggleFullscreen()
+        case .fullscreen(let toggle):
+            setFullscreen(toggle)
+
+        case .floating(let toggle):
+            setFloating(toggle)
+
+        case .exit:
+            guard let handler = onExitRequested else {
+                log.warn("終了が配線されていない")
+                return
+            }
+            handler()
 
         case .focusCycle(let target):
             cycleFocus(target)
+
+        case .exec(let line):
+            runShell(line)
+
+        case .flattenWorkspaceTree:
+            guard TreeOperations.flatten(root) else {
+                log.debug("ツリーは既に平ら")
+                return
+            }
+            focusedAncestorDepth = 0
+            workspaces.active.isLayoutDirty = true
+            log.info("ツリーを平らにした: \(treeDescription)")
+            relayout()
+
+        case .focusContainer(let target):
+            focusContainer(target)
+
+        case .focusLayer(let layer):
+            focusLayer(layer)
+
+        case .split(let target):
+            reserveSplit(target)
+
+        case .focusMonitor(let target):
+            focusMonitor(target)
+
+        case .moveNodeToMonitor(let target):
+            moveFocusedWindowToMonitor(target)
+
+        case .moveWorkspaceToMonitor(let target):
+            moveWorkspaceToMonitor(target)
+
+        case .mode(let name):
+            guard let handler = onModeRequested else {
+                log.warn("モードの切り替えが配線されていない: \(name)")
+                return
+            }
+            handler(name)
+        }
+    }
+
+    /// キーの層を切り替える要求。`main.swift` が配線する。
+    ///
+    /// `Engine` はホットキーの登録を知らないので、切り替えそのものは外に任せる。
+    public var onModeRequested: (@MainActor (String) -> Void)?
+
+    /// 終了の要求（i3 の `exit`）。`main.swift` が配線する。
+    ///
+    /// **`Engine` 自身は終わり方を知らない。** 退避したウィンドウを戻し、
+    /// 隠したアプリを表示に戻す手順（``prepareForTermination()``）を踏んでから
+    /// プロセスを終える必要があり、それは常駐側の仕事。
+    public var onExitRequested: (@MainActor () -> Void)?
+
+    // MARK: - モニタ
+
+    /// 指定のモニタを解決する。
+    ///
+    /// - Returns: 行き先が無い（1台しかない、端で `left`/`right`）なら `nil`。
+    private func resolveMonitor(_ target: MonitorTarget) -> MonitorID? {
+        let current = workspaces.focusedMonitor
+        let ordered = workspaces.monitors
+        guard ordered.count > 1 else {
+            log.debug("モニタが1台しかないので移動先が無い")
+            return nil
+        }
+        switch target {
+        case .next: return workspaces.monitor(offsetFrom: current, by: 1)
+        case .previous: return workspaces.monitor(offsetFrom: current, by: -1)
+        case .main:
+            guard let primary = monitors.primary?.id else { return nil }
+            return primary
+        case .left, .right:
+            // **方向指定は端で巻き戻らない**（i3 と同じ）。巻き戻ると、右端で
+            // `right` を押したときに一番左へ飛んで面食らう。
+            guard let index = ordered.firstIndex(of: current) else { return nil }
+            let next = target == .right ? index + 1 : index - 1
+            guard ordered.indices.contains(next) else {
+                log.debug("その方向にモニタが無い: \(target.rawValue)")
+                return nil
+            }
+            return ordered[next]
+        }
+    }
+
+    /// 別のモニタへフォーカスを移す（i3 の `focus output`）。
+    private func focusMonitor(_ target: MonitorTarget) {
+        guard let monitor = resolveMonitor(target), monitor != workspaces.focusedMonitor else {
+            return
+        }
+        rememberFocus(leaving: workspaces.active)
+        guard workspaces.focusMonitor(monitor), let workspace = workspaces[workspaces.activeID]
+        else { return }
+        log.info("モニタ #\(monitor)（ws\(workspace.id)）へフォーカスを移す")
+        notifyVisibleWorkspaces()
+        restoreFocus(in: workspace)
+    }
+
+    /// フォーカス中のウィンドウを別のモニタへ移す（i3 の `move container to output`）。
+    ///
+    /// 行き先はそのモニタが**今映しているワークスペース**。移したウィンドウを
+    /// 追いかけてフォーカスも移る（i3 と同じ）。
+    private func moveFocusedWindowToMonitor(_ target: MonitorTarget) {
+        guard let monitor = resolveMonitor(target),
+            let destination = workspaces.shown(on: monitor),
+            let windowID = focusedWindowOnActiveWorkspace(),
+            let record = registry[windowID], record.workspace != destination
+        else { return }
+
+        registry.update(windowID) { $0.workspace = destination }
+        workspaces[record.workspace]?.isLayoutDirty = true
+        workspaces[destination]?.isLayoutDirty = true
+        workspaces[destination]?.lastFocused = windowID
+        // 退避先の記録は捨てる。別のモニタへ出す時点で位置は作り直しになる。
+        stashedFrames.removeValue(forKey: windowID)
+        toleratedFrames.removeValue(forKey: windowID)
+        // **学習した最小寸法は残す。** モニタが変わってもアプリの下限は変わらない。
+        log.info("[\(windowID)] をモニタ #\(monitor)（ws\(destination)）へ移した")
+        workspaces.focusMonitor(monitor)
+        pendingFocusRestore = destination
+        notifyVisibleWorkspaces()
+        relayout()
+    }
+
+    /// 今のワークスペースを別のモニタへ移す（i3 の `move workspace to output`）。
+    ///
+    /// 相手のモニタが映していたワークスペースは入れ替わりにこちらへ来る。
+    private func moveWorkspaceToMonitor(_ target: MonitorTarget) {
+        guard let monitor = resolveMonitor(target) else { return }
+        let moving = workspaces.activeID
+        let swapped = workspaces.shown(on: monitor)
+        guard workspaces.moveActiveWorkspace(to: monitor) else { return }
+        // どちらのワークスペースも領域が変わるので、寸法を再適用する。
+        workspaces[moving]?.isLayoutDirty = true
+        if let swapped { workspaces[swapped]?.isLayoutDirty = true }
+        log.info(
+            "ws\(moving) をモニタ #\(monitor) へ移した"
+                + (swapped.map { "（ws\($0) と入れ替え）" } ?? ""))
+        notifyVisibleWorkspaces()
+        relayout()
+    }
+
+    /// コンテナを選ぶ上下移動（i3 の `focus parent` / `focus child`）。
+    ///
+    /// 選んでいる範囲は枠線で見えるようにする。見えないと何を動かすのか分からない。
+    private func focusContainer(_ target: ContainerFocus) {
+        guard let window = focusedNode() else { return }
+        switch target {
+        case .parent:
+            // ルートまで。ルートを選べば `layout` でワークスペース全体の向きを変えられる。
+            guard focusedAncestorDepth < window.ancestors.count else {
+                log.debug("これ以上上のコンテナが無い")
+                return
+            }
+            focusedAncestorDepth += 1
+        case .child:
+            guard focusedAncestorDepth > 0 else {
+                log.debug("すでにウィンドウを選んでいる")
+                return
+            }
+            focusedAncestorDepth -= 1
+        }
+        log.debug(
+            "フォーカスの階層: \(focusedAncestorDepth) → \(focusedTarget()?.description ?? "?")")
+        notifyFocusedFrame()
+    }
+
+    /// タイルとフローティングの間でフォーカスを移す
+    ///（i3 の `focus mode_toggle` / `focus floating` / `focus tiling`）。
+    ///
+    /// 行き先は**その層で最後に使ったウィンドウ**。番号順にすると、浮かせた
+    /// ウィンドウが増えたときに毎回別のものへ飛ぶ。
+    private func focusLayer(_ layer: FocusLayer) {
+        guard let current = focusedWindowOnActiveWorkspace(), let record = registry[current]
+        else { return }
+        let wantsFloating = layer.wantsFloating ?? !record.disposition.isFloating
+        guard wantsFloating != record.disposition.isFloating else {
+            log.trace("既にその層に居る")
+            return
+        }
+        let candidates = registry.visibleIDs(in: workspaces.activeID).filter {
+            registry[$0]?.disposition.isFloating == wantsFloating
+        }
+        guard
+            let target = candidates.max(by: {
+                (registry[$0]?.lastFocusedAt ?? 0) < (registry[$1]?.lastFocusedAt ?? 0)
+            })
+        else {
+            log.debug(wantsFloating ? "フローティングのウィンドウが無い" : "タイルのウィンドウが無い")
+            return
+        }
+        focusWindow(target)
+    }
+
+    /// 次に開くウィンドウの入り方を予約する（i3 の `split h` / `split v`）。
+    private func reserveSplit(_ target: SplitTarget) {
+        guard let id = focusedWindowOnActiveWorkspace(), let node = root.findWindow(id) else {
+            return
+        }
+        let orientation: Orientation
+        switch target {
+        case .horizontal: orientation = .horizontal
+        case .vertical: orientation = .vertical
+        case .opposite: orientation = (node.parent?.orientation ?? .horizontal).flipped
+        }
+        pendingSplit = (windowID: id, orientation: orientation)
+        log.info("[\(id)] の次のウィンドウは \(orientation.rawValue) に分けて入れる")
+    }
+
+    /// シェルへ渡して実行する。**待たない。**
+    ///
+    /// i3 の `exec`。`$mod+Return` でターミナルを開くのが i3 の基本操作なので、
+    /// これが無いと常用の起点が作れない。
+    ///
+    /// - Important: **終了を待ってはいけない。** 待つとホットキーの配送が止まる。
+    ///   標準入出力は捨てる（繋いだままにすると、出力を読まない相手が
+    ///   パイプを埋めた時点で止まる）。
+    private func runShell(_ line: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", line]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        // 参照を残さないと、終了を待つ前に解放されてゾンビが残りうる。
+        process.terminationHandler = { [weak self] finished in
+            Task { @MainActor in
+                self?.launchedProcesses.removeAll { $0 === finished }
+            }
+        }
+        do {
+            try process.run()
+            launchedProcesses.append(process)
+            log.info("exec: \(line)（pid=\(process.processIdentifier)）")
+        } catch {
+            log.error("exec に失敗した: \(line): \(error)")
         }
     }
 
@@ -808,7 +1549,7 @@ public final class Engine: WindowResolving {
                 || record.disposition.isOnOtherMonitor
             else { return nil }
             if focusCycleScope == .activeWorkspace, !record.disposition.isOnOtherMonitor,
-                record.workspace != workspaces.activeID
+                !workspaces.isVisible(record.workspace)
             {
                 return nil
             }
@@ -817,13 +1558,241 @@ public final class Engine: WindowResolving {
         }
     }
 
+    // MARK: - フローティングのウィンドウ
+
+    /// キーボードで動かすときの1回の量。
+    ///
+    /// i3 の既定（10px）より大きくしてある。comet では `move` を押しっぱなしにしても
+    /// 繰り返さないので、1回で見て分かるだけ動かないと使えない。
+    /// 細かく決めたいときは `move left 10 px` と点数を書く。
+    private static let floatingMoveStep: CGFloat = 50
+
+    /// コマンドの対象がフローティングのウィンドウなら、その ID。
+    ///
+    /// **タイル用の経路と分ける必要がある。** フローティングはツリーに居ないので、
+    /// `focusedNode()` は「最後にフォーカスしたタイルの葉」を返してしまう。
+    /// それを対象にすると、浮いているウィンドウを選んでいるのに**別のウィンドウが
+    /// 動く**（実際にそうなっていた）。
+    private func focusedFloatingWindow() -> CGWindowID? {
+        guard let id = focusedWindowOnActiveWorkspace(),
+            registry[id]?.disposition.isFloating == true
+        else { return nil }
+        return id
+    }
+
+    /// フローティングのウィンドウの今の矩形。
+    ///
+    /// 配置計算の対象外なので `desiredFrames` には無い。実測値が唯一の手がかり。
+    private func floatingFrame(of id: CGWindowID) -> CGRect? {
+        guard let frame = registry[id]?.observedFrame, frame.width > 0, frame.height > 0 else {
+            log.debug("[\(id)] の矩形が分からないので動かせない")
+            return nil
+        }
+        return frame
+    }
+
+    /// フローティングのウィンドウを動かす。
+    private func nudgeFloating(_ id: CGWindowID, by delta: CGSize) {
+        guard let frame = floatingFrame(of: id) else { return }
+        let moved = frame.offsetBy(dx: delta.width, dy: delta.height)
+        applyFloatingFrame(id, moved, setSize: false)
+    }
+
+    /// フローティングのウィンドウを今のモニタの中央へ（i3 の `move position center`）。
+    private func centerFloating(_ id: CGWindowID) {
+        guard let frame = floatingFrame(of: id) else { return }
+        guard let area = floatingArea(for: frame) else { return }
+        let centered = CGRect(
+            x: area.midX - frame.width / 2, y: area.midY - frame.height / 2,
+            width: frame.width, height: frame.height)
+        applyFloatingFrame(id, centered, setSize: false)
+    }
+
+    /// フローティングのウィンドウの寸法を変える。
+    ///
+    /// **左上を固定して広げる。** 分割の境界を持たないので、隣に譲らせる余地が無い。
+    private func resizeFloating(_ id: CGWindowID, dimension: Dimension, delta: CGFloat) {
+        guard let frame = floatingFrame(of: id) else { return }
+        // 潰れて呼び戻せなくなるのを防ぐ下限。アプリ自身の最小寸法はこれより
+        // 大きいことが多いので、そちらに当たれば実測がそこで止まるだけ。
+        let floor: CGFloat = 100
+        var resized = frame
+        switch dimension {
+        case .width:
+            resized.size.width = max(floor, frame.width + delta)
+        case .height:
+            resized.size.height = max(floor, frame.height + delta)
+        }
+        applyFloatingFrame(id, resized, setSize: true)
+    }
+
+    /// フローティングのウィンドウを収める領域。
+    private func floatingArea(for frame: CGRect) -> CGRect? {
+        (monitors.owner(of: frame) ?? focusedMonitor)?.visibleFrame
+    }
+
+    /// フローティングのウィンドウへ矩形を流し込む。
+    ///
+    /// **`desiredFrames` には入れない。** 入れると見張りが「ずれている」と判断して
+    /// 掴んで動かすたびに引き戻しに来る。フローティングは利用者のものにしておく。
+    private func applyFloatingFrame(_ id: CGWindowID, _ frame: CGRect, setSize: Bool) {
+        // 画面の外へ出すと呼び戻せない。モニタの中へ押し込む。
+        let clamped = floatingArea(for: frame).map { Geometry.clamped(frame, within: $0) } ?? frame
+        registry.update(id) { $0.observedFrame = clamped }
+        // 退避先から戻す位置も更新する。覚え直さないと、ワークスペースを往復した
+        // ときに動かす前の位置へ跳ね返る。
+        if stashedFrames[id] != nil { stashedFrames[id] = clamped }
+        scheduler.reapply(id, TargetFrame(rect: clamped, setSize: setSize))
+        // 枠線は AX の適用を待たずに動かす。待つと操作が鈍く見える。
+        notifyFocusedFrame(measured: (id: id, frame: clamped))
+        log.debug("[\(id)] を \(Geometry.rendered(clamped)) へ動かした（フローティング）")
+    }
+
+    // MARK: - フォーカスをポインタに追従させる
+
+    /// 自分でポインタを飛ばした直後は反応しない猶予。
+    ///
+    /// `move-mouse` は「フォーカス中のウィンドウの中央へ」飛ばす。追従が反応すると
+    /// **飛ばした先のウィンドウをフォーカスし直す**ので、フォーカスとポインタが
+    /// 互いを追いかけ続ける。
+    private static let mouseWarpGrace: TimeInterval = 0.3
+
+    private var mouseMonitor: Any?
+    private var lastMouseWarpAt: TimeInterval = 0
+    /// 直前に判定した位置。同じ場所の通知に何度も反応しない。
+    private var lastMousePoint: CGPoint?
+
+    private func startMouseTracking() {
+        guard mouseMonitor == nil, !isDryRun else { return }
+        // `CGEventTap` ではなく大域モニタを使う。**入力監視の権限を増やさない**ため。
+        // アクセシビリティ権限だけで受け取れる。
+        mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) {
+            [weak self] _ in
+            MainActor.assumeIsolated { self?.pointerMoved() }
+        }
+        log.info("focus-follows-mouse: 有効（ポインタが乗ったウィンドウへフォーカスを移す）")
+    }
+
+    private func stopMouseTracking() {
+        guard let monitor = mouseMonitor else { return }
+        NSEvent.removeMonitor(monitor)
+        mouseMonitor = nil
+        lastMousePoint = nil
+        log.info("focus-follows-mouse: 無効")
+    }
+
+    private func pointerMoved() {
+        guard focusFollowsMouse else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastMouseWarpAt > Self.mouseWarpGrace else { return }
+        // **掴んでいる間は動かさない。** ドラッグで他のウィンドウを跨ぐたびに前面が
+        // 変わると、掴んだものが後ろへ回って操作にならない。
+        guard !isUserDragging() else { return }
+
+        let point = Geometry.toAX(
+            CGRect(origin: NSEvent.mouseLocation, size: .zero),
+            primaryMaxY: MonitorManager.primaryMaxY
+        ).origin
+        if let last = lastMousePoint, abs(last.x - point.x) < 1, abs(last.y - point.y) < 1 {
+            return
+        }
+        lastMousePoint = point
+
+        guard let target = managedWindow(at: point), target != focusedWindowID else { return }
+        log.trace("focus-follows-mouse: [\(target)] へ移す")
+        focusWindow(target)
+    }
+
+    /// その点にあるウィンドウ。
+    ///
+    /// **AX にも `CGWindowList` にも問い合わせない。** 追従はポインタが動くたびに
+    /// 判定するので、1回でも往復を挟むと常駐コストが跳ね上がる。既に持っている
+    /// 目標矩形（タイル）と実測矩形（フローティング）だけで決める。
+    ///
+    /// 重なりの順序は「全画面 → フローティング → タイル」。タイルは互いに重ならない。
+    private func managedWindow(at point: CGPoint) -> CGWindowID? {
+        var floatingHit: CGWindowID?
+        var tiledHit: CGWindowID?
+        for pair in workspaces.visiblePairs {
+            // 全画面のウィンドウは他を覆っているので、含まれていれば即座に決まる。
+            if let full = pair.workspace.fullscreenWindowID,
+                desiredFrames[full]?.contains(point) == true
+            {
+                return full
+            }
+            for id in registry.visibleIDs(in: pair.workspace.id) {
+                guard let record = registry[id] else { continue }
+                if record.disposition.isFloating {
+                    guard record.observedFrame?.contains(point) == true else { continue }
+                    floatingHit = id
+                } else if record.disposition.isTiled {
+                    guard desiredFrames[id]?.contains(point) == true else { continue }
+                    tiledHit = id
+                }
+            }
+        }
+        return floatingHit ?? tiledHit
+    }
+
+    // MARK: - マウスポインタ
+
+    /// マウスポインタを動かす（AeroSpace の `move-mouse`）。
+    ///
+    /// **フォーカスを追ってポインタが飛ぶのは煩わしい**ので、既定のバインドには
+    /// 入れない。「ポインタがどこかへ行ってしまった」ときの呼び戻しに使う。
+    private func moveMouse(_ target: MouseTarget) {
+        let area: CGRect?
+        if target.isWindow {
+            area = focusedWindowOnActiveWorkspace().flatMap {
+                desiredFrames[$0] ?? registry[$0]?.observedFrame
+            }
+        } else {
+            area = focusedMonitor?.visibleFrame
+        }
+        guard let area, area.width > 0, area.height > 0 else {
+            log.debug("move-mouse の行き先が分からない")
+            return
+        }
+        // 既に中に居るなら動かさない（lazy）。
+        let current = Geometry.toAX(
+            CGRect(origin: NSEvent.mouseLocation, size: .zero),
+            primaryMaxY: MonitorManager.primaryMaxY
+        ).origin
+        if target.isLazy, area.contains(current) {
+            log.trace("move-mouse: 既に範囲の中に居るので動かさない")
+            return
+        }
+        let center = CGPoint(x: area.midX, y: area.midY)
+        // CGWarpMouseCursorPosition はグローバル座標（左上原点）を取る。
+        lastMouseWarpAt = ProcessInfo.processInfo.systemUptime
+        CGWarpMouseCursorPosition(center)
+        // ワープでは移動イベントが出ないため、ホバーの状態が更新されない。
+        // 関連付けを一度切って戻すと macOS が現在位置を作り直す。
+        CGAssociateMouseAndMouseCursorPosition(1)
+        log.debug("マウスポインタを (\(Int(center.x)), \(Int(center.y))) へ動かした")
+    }
+
     /// フォーカス中のウィンドウを領域いっぱいに広げる／戻す。
     ///
     /// ツリーは変えない。**覆うだけ**なので、解除すると元の配置がそのまま出てくる。
-    private func toggleFullscreen() {
+    private func setFullscreen(_ toggle: Toggle) {
         guard let id = focusedWindowOnActiveWorkspace() else { return }
         let workspace = workspaces.active
-        if workspace.fullscreenWindowID == id {
+        // **フローティングは覆えない。** 配置計算の対象外なので目標矩形を持たず、
+        // 全画面の矩形を当てる先が無い。黙って無反応にすると壊れたように見えるので、
+        // 何をすればよいかまで伝える。
+        guard registry[id]?.disposition.isFloating != true else {
+            log.info(
+                "[\(id)] はフローティングなので全画面にできない"
+                    + "（`floating disable` でタイルに戻すと広げられる）")
+            return
+        }
+        let isFullscreen = workspace.fullscreenWindowID == id
+        guard toggle.resolve(current: isFullscreen) != isFullscreen else {
+            log.trace("全画面の状態は既に指定どおり")
+            return
+        }
+        if isFullscreen {
             workspace.fullscreenWindowID = nil
             log.info("[\(id)] の全画面を解除した")
         } else {
@@ -878,53 +1847,199 @@ public final class Engine: WindowResolving {
     /// `["move-node-to-workspace 3", "workspace 3"]` のような複数コマンドで
     /// 中間状態が画面に出てしまう。再配置は1回にまとめられるので1フレームで完了する。
     public func switchWorkspace(to target: WorkspaceTarget) {
+        guard let id = resolveWorkspace(target) else { return }
         let outgoing = workspaces.active
+        // 追従を止める猶予の起点。**実際に切り替わる場合だけ**控える
+        //（`alreadyActive` で止めると、押しただけで追従が鈍る）。
+        if id != workspaces.activeID {
+            lastWorkspaceSwitchAt = ProcessInfo.processInfo.systemUptime
+        }
 
-        let switched: Bool
+        switch workspaces.activate(id) {
+        case .unknown:
+            return
+
+        case .alreadyActive:
+            // **同じ番号をもう一度押したら直前へ戻る**（i3 の
+            // `workspace_auto_back_and_forth`）。番号を押し間違えたときの
+            // 取り消しにもなる。番号を明示した場合だけ効かせる。
+            guard workspaceAutoBackAndForth, case .index = target,
+                let previous = workspaces.previousID, previous != id
+            else { return }
+            log.debug("ワークスペース \(id) は既に表示中なので直前の \(previous) へ戻る")
+            switchWorkspace(to: .index(previous))
+            return
+
+        case .focusedOtherMonitor(let monitor):
+            // **既に別のモニタに映っているなら、フォーカスを移すだけ。**
+            // ウィンドウを動かすと、そのモニタで作業していた配置が壊れる（i3 と同じ扱い）。
+            rememberFocus(leaving: outgoing)
+            log.info("ワークスペース \(id) は別のモニタ #\(monitor) に映っているのでそちらへ移る")
+            pendingFocusRestore = id
+            notifyVisibleWorkspaces()
+            relayout()
+
+        case .replaced(let monitor, let outgoingID):
+            rememberFocus(leaving: outgoing)
+            restoringWorkspaces.insert(id)
+            log.info("モニタ #\(monitor): ワークスペース \(outgoingID) → \(id)")
+            // 壁紙とインジケータはウィンドウ移動より先に。どちらも自プロセス側なので
+            // 即座に終わり、切替が速く見える（症状D）。
+            notifyVisibleWorkspaces()
+            // フォーカスは**再配置のあと**に戻す。先に戻すと、まだ退避先にいる
+            // ウィンドウをアクティブにしてしまい「アプリは前面だが見えない」状態になる。
+            pendingFocusRestore = id
+            // **ここは `immediately: true` にしない。** 「移動 + 切替」のように1つの
+            // バインドで複数コマンドを撃つとき、まとめて1回の再配置にすることで
+            // 中間状態が画面に出ない。
+            relayout()
+        }
+    }
+
+    /// 直前にワークスペースを切り替えた時刻（`systemUptime`）。
+    ///
+    /// これより後の短い間は、アクティブ化への追従を止める
+    ///（``followActivationIfNeeded(_:)`` を見ること）。
+    private var lastWorkspaceSwitchAt: TimeInterval = 0
+
+    /// 切替のあと、アクティブ化への追従を止めておく時間。
+    ///
+    /// **アプリを隠すのは非同期**で、macOS が前面を選び直すまでに数十 ms かかる
+    ///（実測 39ms）。それより十分に長く、かつ利用者の次の操作を邪魔しない長さ。
+    private static let activationFollowGrace: TimeInterval = 0.5
+
+    /// 離脱側のフォーカスを保存する。戻ってきたときにここへ返す。
+    ///
+    /// 他のワークスペースのウィンドウを覚えても意味がないので絞る
+    ///（focus-follows-activation ではこの状況が普通に起きる）。
+    private func rememberFocus(leaving workspace: Workspace) {
+        guard let focused = focusedWindowID, registry[focused]?.workspace == workspace.id else {
+            return
+        }
+        workspace.lastFocused = focused
+    }
+
+    /// モニタ構成の変化を割り当てへ反映する。
+    ///
+    /// **消えたモニタが映していたワークスペースは退避される。** 割り当てを直さないと
+    /// 「どのモニタにも映っていないのに退避もされない」ウィンドウが画面に残る。
+    private func syncMonitorAssignment() {
+        let ids = managesAllMonitors
+            ? monitors.monitors.map(\.id)
+            : monitors.primary.map { [$0.id] } ?? []
+        guard workspaces.reassign(monitors: ids) else { return }
+        log.info("モニタとワークスペースの割り当て: \(visibleAssignmentDescription)")
+        notifyVisibleWorkspaces()
+    }
+
+    private var visibleAssignmentDescription: String {
+        workspaces.visiblePairs.map { "#\($0.monitor)=ws\($0.workspace.id)" }
+            .joined(separator: " ")
+    }
+
+    /// ワークスペースの見え方を伝える。壁紙とインジケータの更新に使う。
+    private func notifyVisibleWorkspaces() {
+        guard let handler = onWorkspaceStatusChanged else { return }
+        let status = workspaceStatus
+        lastNotifiedStatus = status
+        handler(status)
+    }
+
+    /// 中身の増減も含めて、変わっていたら伝える。
+    ///
+    /// ウィンドウを開いた・閉じた・別の番号へ移したときも「どの番号に居るか」の
+    /// 表示は変わる。切替のときだけ伝えていると、バーの表示が実態から遅れる。
+    private func notifyVisibleWorkspacesIfChanged() {
+        guard onWorkspaceStatusChanged != nil, workspaceStatus != lastNotifiedStatus else { return }
+        notifyVisibleWorkspaces()
+    }
+
+    private var lastNotifiedStatus: WorkspaceStatus?
+
+    /// ワークスペースの見え方。
+    public var workspaceStatus: WorkspaceStatus {
+        WorkspaceStatus(
+            visible: workspaces.visiblePairs.map {
+                MonitorAssignment(monitor: $0.monitor, workspace: $0.workspace.id)
+            },
+            focused: workspaces.activeID,
+            occupied: occupiedWorkspaces,
+            total: workspaces.count)
+    }
+
+    /// ウィンドウが1枚以上あるワークスペース。
+    ///
+    /// 数えるのは**並べる対象と浮かせたもの**だけ。ダイアログや最小化されたものを
+    /// 数えると、閉じても番号が消えずに実態とずれる。
+    public var occupiedWorkspaces: Set<WorkspaceID> {
+        var result: Set<WorkspaceID> = []
+        for id in registry.allIDs {
+            guard let record = registry[id],
+                record.disposition.isTiled || record.disposition.isFloating
+            else { continue }
+            result.insert(record.workspace)
+        }
+        return result
+    }
+
+    /// フォーカスのあるモニタを、フォーカス中のウィンドウに合わせる。
+    ///
+    /// **これが無いと、2画面でコマンドの対象が読めなくなる。** 右の画面のウィンドウを
+    /// クリックしたのに、コマンドが左の画面のワークスペースへ効いてしまう。
+    private func followFocusedMonitor(_ id: CGWindowID) {
+        guard let workspace = registry[id]?.workspace,
+            let monitor = workspaces.monitor(showing: workspace),
+            workspaces.focusMonitor(monitor)
+        else { return }
+        log.trace("フォーカスのあるモニタ: #\(monitor)")
+        notifyVisibleWorkspaces()
+    }
+
+    /// `workspace` / `move-node-to-workspace` の行き先を番号に直す。
+    ///
+    /// - Returns: 行けない指定（範囲外、戻る先が無い）なら `nil`。理由はログに残す。
+    private func resolveWorkspace(_ target: WorkspaceTarget) -> WorkspaceID? {
         switch target {
         case .index(let id):
             guard workspaces[id] != nil else {
                 log.warn("ワークスペース \(id) は存在しない（1〜\(workspaces.count)）")
-                return
+                return nil
             }
-            switched = workspaces.activate(id)
+            return id
         case .backAndForth:
-            switched = workspaces.activatePrevious()
-            guard switched else {
+            guard let previous = workspaces.previousID else {
                 log.debug("戻る先のワークスペースがまだ無い")
-                return
+                return nil
             }
+            return previous
+        case .next, .previous:
+            let offset = target == .next ? 1 : -1
+            // **空のワークスペースは飛ばす**（i3 の `workspace next` と同じ）。
+            // 飛ばさないと、使っていない番号を何度も通過することになる。
+            guard
+                let id = workspaces.occupiedID(
+                    offsetFrom: workspaces.activeID, by: offset, occupied: occupiedWorkspaces)
+            else {
+                log.debug("中身のある他のワークスペースが無い")
+                return nil
+            }
+            return id
         }
-        guard switched else { return }
-
-        // 離脱側のフォーカスを保存する。戻ってきたときにここへ返す。
-        // 他のワークスペースのウィンドウを覚えても意味がないので絞る
-        //（focus_follows_activation ではこの状況が普通に起きる）。
-        if let focused = focusedWindowID, registry[focused]?.workspace == outgoing.id {
-            outgoing.lastFocused = focused
-        }
-        let incoming = workspaces.active
-        isRestoringWorkspace = true
-
-        log.info("ワークスペース \(outgoing.id) → \(incoming.id)")
-        // 壁紙とインジケータはウィンドウ移動より先に。どちらも自プロセス側なので
-        // 即座に終わり、切替が速く見える（症状D）。
-        onWorkspaceChanged?(incoming.id)
-        // フォーカスは**再配置のあと**に戻す。先に戻すと、まだ退避先にいる
-        // ウィンドウをアクティブにしてしまい「アプリは前面だが見えない」状態になる。
-        pendingFocusRestore = incoming.id
-        // **ここは `immediately: true` にしない。** 「移動 + 切替」のように1つの
-        // バインドで複数コマンドを撃つとき、まとめて1回の再配置にすることで
-        // 中間状態が画面に出ない。
-        relayout()
     }
 
     /// フォーカス中のウィンドウを別のワークスペースへ移す。表示は切り替えない。
-    public func moveFocusedWindow(to id: WorkspaceID) {
-        guard workspaces[id] != nil else {
-            log.warn("ワークスペース \(id) は存在しない（1〜\(workspaces.count)）")
-            return
+    ///
+    /// `next` / `prev` は**番号順**（空のワークスペースも飛ばさない）。
+    /// 移動は「今の場所から出す」のが目的なので、空いている番号へ出せるほうがよい。
+    /// 一方 `workspace next` は「行った先に何かある」ほうがよいので空を飛ばす。
+    public func moveFocusedWindow(to target: WorkspaceTarget) {
+        let resolved: WorkspaceID?
+        switch target {
+        case .next: resolved = workspaces.id(offsetFrom: workspaces.activeID, by: 1)
+        case .previous: resolved = workspaces.id(offsetFrom: workspaces.activeID, by: -1)
+        default: resolved = resolveWorkspace(target)
         }
+        guard let id = resolved else { return }
         guard let windowID = focusedWindowOnActiveWorkspace(),
             let record = registry[windowID], record.workspace != id
         else { return }
@@ -933,6 +2048,11 @@ public final class Engine: WindowResolving {
         // 移動元と移動先はどちらも並びが変わる。復帰時にサイズを適用し直す。
         workspaces[record.workspace]?.isLayoutDirty = true
         workspaces[id]?.isLayoutDirty = true
+        // **移した先で選ばれるようにしておく。** `["move-node-to-workspace 3",
+        // "workspace 3"]` のような組み合わせでは、切替後のフォーカス復元が
+        // 移動先の記録を見る。書き換えないと、せっかく持って行ったウィンドウとは
+        // 別のものが選ばれて追従したように見えない。
+        workspaces[id]?.lastFocused = windowID
 
         // 移した先が非表示なら、フォーカスは表示中のワークスペースへ戻す。
         // 画面から消えたウィンドウにフォーカスが残ると、キー入力の宛先が見えなくなる。
@@ -964,9 +2084,14 @@ public final class Engine: WindowResolving {
         focusWindow(target)
     }
 
+    /// フォーカスのあるモニタ。割り当てが崩れていればプライマリに落とす。
+    private var focusedMonitor: MonitorManager.Monitor? {
+        monitors.monitor(id: workspaces.focusedMonitor) ?? monitors.primary
+    }
+
     /// 今のツリーに対するレイアウト。**副作用は無い**ので必要なときに作り直せる。
     private func currentLayout() -> LayoutEngine.Result? {
-        guard let monitor = monitors.primary, !root.isEmpty else { return nil }
+        guard let monitor = focusedMonitor, !root.isEmpty else { return nil }
         return LayoutEngine.compute(
             root: root, area: monitor.visibleFrame, gaps: gaps, scale: monitor.scale,
             minimums: minimumSizes)
@@ -984,7 +2109,11 @@ public final class Engine: WindowResolving {
         if arguments.contains(.tiles), let id = focusedWindowOnActiveWorkspace(),
             registry[id]?.disposition.isFloating == true
         {
+            floatingWindows.remove(id)
             registry.update(id) { $0.disposition = .tiled }
+            // **寸法の再適用を要求する。** 切替直後は位置だけを送る最適化が効いており、
+            // 要求しないとフローティング時の寸法のままタイルの位置へ置かれる。
+            workspaces.active.isLayoutDirty = true
             log.info("[\(id)] をタイルに戻した")
             relayout()
             return
@@ -995,10 +2124,21 @@ public final class Engine: WindowResolving {
             log.warn("layout の引数に向きが無い: \(arguments.map(\.rawValue).joined(separator: " "))")
             return
         }
-        guard let node = focusedNode(),
+        guard let node = focusedTarget(),
             TreeOperations.cycleOrientation(of: node, among: candidates)
         else { return }
         relayout()
+    }
+
+    /// フローティングにする／タイルへ戻す（i3 の `floating enable|disable|toggle`）。
+    private func setFloating(_ toggle: Toggle) {
+        guard let id = focusedWindowOnActiveWorkspace(), let record = registry[id] else { return }
+        let isFloating = record.disposition.isFloating
+        guard toggle.resolve(current: isFloating) != isFloating else {
+            log.trace("フローティングの状態は既に指定どおり")
+            return
+        }
+        toggleFloating()
     }
 
     /// タイル配置とフローティングを切り替える。
@@ -1011,9 +2151,11 @@ public final class Engine: WindowResolving {
 
         switch record.disposition {
         case .tiled:
+            floatingWindows.insert(id)
             registry.update(id) { $0.disposition = .floating }
             log.info("[\(id)] をフローティングにした")
         case .floating:
+            floatingWindows.remove(id)
             registry.update(id) { $0.disposition = .tiled }
             log.info("[\(id)] をタイルに戻した")
             workspaces.active.isLayoutDirty = true
@@ -1024,18 +2166,64 @@ public final class Engine: WindowResolving {
         relayout()
     }
 
-    private func adoptWindow(_ element: AXElement, pid: pid_t) {
+    /// 生成通知を受けたウィンドウを取り込む。
+    ///
+    /// - Important: **一度の失敗で諦めてはいけない。** 生まれた直後の AX 要素は
+    ///   ウィンドウ ID も属性も返さないことがある（ブラウザや Electron 製アプリで
+    ///   起きる）。ここで諦めると、そのウィンドウには個別通知も張られないので
+    ///   移動・破棄の通知も来ず、**以後どの経路からも拾えない**。少し待って
+    ///   試し直す。それでも駄目なら見張りの拾い直し（``adoptMissingWindows``）に任せる。
+    private func adoptWindow(_ element: AXElement, pid: pid_t, attempt: Int = 1) {
         applierPool.queue(for: pid).async {
-            guard let id = AXPrivate.windowID(of: element.raw),
-                let attributes = AXBridge.readWindowAttributes(element.raw)
-            else { return }
-            let discovered = DiscoveredWindow(id: id, element: element, attributes: attributes)
+            let id = AXPrivate.windowID(of: element.raw)
+            let attributes = AXBridge.readWindowAttributes(element.raw)
             Task { @MainActor in
+                guard let id, let attributes else {
+                    guard attempt < Self.maxAdoptionAttempts else {
+                        self.log.debug(
+                            "生成通知のウィンドウを \(attempt) 回試しても読めなかった pid=\(pid)。"
+                                + "見張りの拾い直しに任せる")
+                        return
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + Self.adoptionRetryDelay) {
+                        MainActor.assumeIsolated {
+                            self.adoptWindow(element, pid: pid, attempt: attempt + 1)
+                        }
+                    }
+                    return
+                }
+                let discovered = DiscoveredWindow(
+                    id: id, element: element, attributes: attributes)
                 let bundleID = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
                 // 新しいウィンドウの初回配置は待たせない。**症状A の対策。**
                 // 適用順の先頭に回し、次のランループを待たずにその場で配置する。
                 self.priorityWindows.insert(id)
-                self.register([discovered], pid: pid, bundleID: bundleID, immediately: true)
+                // **新しく開いたウィンドウは今いるモニタへ。** アプリが決めた初期位置
+                // （多くはメイン画面の中央）に従うと、右の画面で作業していても
+                // 左に出てきてしまう。i3 も focused output に開く。
+                self.register(
+                    [discovered], pid: pid, bundleID: bundleID, immediately: true,
+                    placement: .focusedMonitor)
+            }
+        }
+    }
+
+    /// 生成通知を取りこぼしたときに試し直す回数と間隔。
+    ///
+    /// 実測では 1 回目で読めることが多く、読めない場合も 100ms 待てば揃う。
+    /// 上限を置くのは、閉じられたウィンドウを延々と追わないため。
+    private static let maxAdoptionAttempts = 4
+    private static let adoptionRetryDelay: TimeInterval = 0.1
+
+    /// アプリのウィンドウを走査し直す。**冪等。** 既知のウィンドウは所属も
+    /// フォーカス履歴も保たれる（``register(_:pid:bundleID:immediately:)`` 参照）。
+    private func rescan(pid: pid_t) {
+        guard let application = observerHub.application(for: pid) else { return }
+        let bundleID = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+        applierPool.queue(for: pid).async {
+            let scan = AXBridge.scanWindows(of: application.raw)
+            Task { @MainActor in
+                self.register(scan.windows, pid: pid, bundleID: bundleID)
             }
         }
     }
@@ -1059,7 +2247,8 @@ public final class Engine: WindowResolving {
                             isMinimized: attributes.isMinimized,
                             size: attributes.size ?? .zero,
                             layer: ScreenWindows.layer(of: id))),
-                    id: id, bundleID: record.bundleID, title: attributes.title, frame: frame)
+                    id: id, pid: pid, bundleID: record.bundleID, title: attributes.title,
+                    frame: frame)
                 self.registry.update(id) { $0.disposition = disposition }
                 self.relayout()
             }
@@ -1079,7 +2268,7 @@ public final class Engine: WindowResolving {
 
         // 退避中のウィンドウが動かされた。**放っておくと画面の中に現れる。**
         // 位置しか問題にならないので、読み取らずに退避先へ押し戻す（IPC 1回）。
-        if record.workspace != workspaces.activeID,
+        if !workspaces.isVisible(record.workspace),
             record.disposition.isTiled || record.disposition.isFloating
         {
             guard allowExternalReaction(id) else { return }
@@ -1100,6 +2289,28 @@ public final class Engine: WindowResolving {
         if case .unmanaged(let reason) = record.disposition, reason.isTransient {
             guard allowExternalReaction(id) else { return }
             refreshWindow(element, pid: pid)
+            return
+        }
+
+        // **フローティングは押し戻さないが、位置は覚え直す。**
+        //
+        // 覚えないと次の2つが壊れる。
+        //   - 枠線が掴む前の位置に取り残される（ドラッグしても付いてこない）
+        //   - ワークスペースを往復すると動かす前の位置へ跳ね返る（退避から戻す位置は
+        //     `observedFrame` を元にしている）
+        if record.disposition.isFloating {
+            guard pendingExternalReads.insert(id).inserted else { return }
+            applierPool.queue(for: pid).async {
+                let observed = AXBridge.readFrame(element.raw)
+                Task { @MainActor in
+                    self.pendingExternalReads.remove(id)
+                    guard let observed else { return }
+                    self.registry.update(id) { $0.observedFrame = observed }
+                    if self.stashedFrames[id] != nil { self.stashedFrames[id] = observed }
+                    guard self.focusedWindowID == id else { return }
+                    self.notifyFocusedFrame(measured: (id: id, frame: observed))
+                }
+            }
             return
         }
 
@@ -1135,7 +2346,9 @@ public final class Engine: WindowResolving {
     private func reconcileExternalChange(_ id: CGWindowID, observed: CGRect) {
         // **サブディスプレイへ移されたら手放す。** ここで押し戻すと、利用者が
         // ドラッグしているのに引き戻される綱引きになる。以後は素の macOS と同じ扱い。
-        if MonitorManager.isOutsideMain(observed, monitors: monitors.monitors) {
+        if !managesAllMonitors,
+            MonitorManager.isOutsideMain(observed, monitors: monitors.monitors)
+        {
             log.info("[\(id)] がメインディスプレイの外へ出たので管理から外す")
             registry.update(id) {
                 $0.disposition = .unmanaged(.otherMonitor)
@@ -1177,7 +2390,10 @@ public final class Engine: WindowResolving {
 
         // 動いた辺のすべてが分割の境界に対応するなら「境界を動かした」＝リサイズ。
         // ひとつでも対応しない辺があれば、動かせない外周が動いている＝移動。
-        guard let layout = lastLayout, let node = root.findWindow(id) else {
+        guard let workspace = registry[id]?.workspace,
+            let layout = lastLayouts[workspace],
+            let node = workspaces[workspace]?.root.findWindow(id)
+        else {
             scheduler.reapply(id, TargetFrame(rect: desired))
             return
         }
@@ -1261,28 +2477,110 @@ public final class Engine: WindowResolving {
         let timer = Timer.scheduledTimer(
             withTimeInterval: Self.layoutGuardInterval, repeats: true
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.enforceLayout() }
+            MainActor.assumeIsolated { self?.guardTick() }
         }
         timer.tolerance = Self.layoutGuardInterval / 2
         layoutGuardTimer = timer
     }
 
-    private func enforceLayout() {
+    /// 見張りの1周期。**画面の一覧は1回だけ読み、両方の用途で使い回す。**
+    private func guardTick() {
+        let screen = ScreenWindows.snapshot()
+        guardTicks += 1
+
+        // **Mission Control の間は何もしない。**
+        //
+        // 覆いが出ている間、ウィンドウは一覧から消えず**縮小されて並べ替えられる**
+        //（実測: (962,28) 955x959 → (968,86) 893x896）。これを「外部から動かされた」と
+        // 読むと配置を戻しに行き、実測で2秒に 24 回の AX 書き込みが飛んだ。さらに
+        // 「戻しても直らない相手」と判断されて**閉じたあと 20 秒間 見張りが止まる**。
+        if let screen, isSystemOverlayVisible(screen: screen) {
+            if !wasSystemOverlayVisible {
+                wasSystemOverlayVisible = true
+                log.debug("画面を覆うものが出ているので見張りを止める（Mission Control など）")
+            }
+            return
+        }
+        if wasSystemOverlayVisible {
+            wasSystemOverlayVisible = false
+            log.debug("画面を覆うものが消えたので見張りを戻す")
+        }
+
+        // 取りこぼしの拾い直しは毎周期やる必要がない。走査は AX の往復を伴うので、
+        // 見張りより十分に長い間隔にする。
+        if guardTicks % Self.reconcileEveryTicks == 0, let screen {
+            adoptMissingWindows(screen: screen)
+        }
+        enforceLayout(screen: screen)
+    }
+
+    /// Mission Control などが画面を覆っているか。
+    ///
+    /// Dock のウィンドウは **PID で選ぶ**。名前（`kCGWindowName`）の取得には
+    /// 画面収録の権限が要り、comet はそれを要求しない方針。
+    private func isSystemOverlayVisible(screen: [CGWindowID: ScreenWindows.Entry]) -> Bool {
+        guard let dock = dockPID ?? SystemOverlay.dockPID() else { return false }
+        dockPID = dock
+        let sizes = screen.values.filter { $0.ownerPID == dock }.map(\.bounds.size)
+        return SystemOverlay.isVisible(
+            dockWindowSizes: sizes, displaySizes: monitors.monitors.map(\.frame.size))
+    }
+
+    private var dockPID: pid_t?
+    private var wasSystemOverlayVisible = false
+
+    private var guardTicks = 0
+    /// 取りこぼしの拾い直しを行う周期（見張り何回ぶんか）。0.5秒 × 20 = 10秒。
+    private static let reconcileEveryTicks = 20
+
+    /// 台帳に無いウィンドウを見つけて走査し直す。
+    ///
+    /// **AX の生成通知に取りこぼしがあるので保険が要る。** 生まれた直後の AX 要素は
+    /// ウィンドウ ID も属性も返さないことがあり（ブラウザや Electron 製アプリで起きる）、
+    /// そこで諦めるとそのウィンドウには個別通知も張られないため**以後どの経路からも
+    /// 拾えなくなる**。`CGWindowList` は全ウィンドウを 0.3ms で返すので、
+    /// 「監視しているアプリなのに台帳に無い」窓を定期的に探す。
+    ///
+    /// 何度走査しても拾えない窓（ID を取れない疑似ウィンドウなど）と延々と
+    /// 付き合わないよう、同じ ID について試す回数に上限を置く。
+    private func adoptMissingWindows(screen: [CGWindowID: ScreenWindows.Entry]) {
+        let owners = missingWindows.owners(
+            screen: screen,
+            known: { self.registry[$0] != nil },
+            monitored: { self.observerHub.application(for: $0) != nil },
+            own: getpid())
+        for pid in owners {
+            log.debug("台帳に無いウィンドウがあるので走査し直す pid=\(pid)")
+            rescan(pid: pid)
+        }
+    }
+
+    private var missingWindows = MissingWindowFinder()
+
+    private func enforceLayout(screen: [CGWindowID: ScreenWindows.Entry]?) {
         guard !desiredFrames.isEmpty else { return }
         // **操作中は手を出さない。** 掴んでいる間に押し返すと引っ張り合いになる。
         // 離した直後（dragGrace の間）も待つ。戻すのはそのあと一度で足りる。
         guard currentDraggingWindow() == nil, !isUserDragging() else { return }
-        guard let screen = ScreenWindows.snapshot() else { return }
+        guard let screen else { return }
 
         let now = ProcessInfo.processInfo.systemUptime
         for (id, desired) in desiredFrames {
             guard let record = registry[id], record.disposition.isTiled,
-                record.workspace == workspaces.activeID,
+                workspaces.isVisible(record.workspace),
                 let actual = screen[id]?.bounds
             else { continue }
             // 自分の適用による動きの最中は見ない。補正は scheduler の担当。
             guard !scheduler.isSettling(id) else { continue }
             guard LayoutGuard.isOff(actual, from: desired) else {
+                layoutGuard.settled(id)
+                continue
+            }
+            // **寄せ切れないと分かっている組み合わせなら、それが落ち着いた姿。**
+            // ここで戻しに行くと、補正3回 → 諦め → 20秒後にまた、が永久に続く。
+            if LayoutGuard.isSettledAtLimit(
+                actual: actual, desired: desired, tolerated: toleratedFrames[id])
+            {
                 layoutGuard.settled(id)
                 continue
             }
@@ -1397,6 +2695,10 @@ public final class Engine: WindowResolving {
         stashedFrames.removeValue(forKey: id)
         priorityWindows.remove(id)
         restoreAttempts.removeValue(forKey: id)
+        toleratedFrames.removeValue(forKey: id)
+        floatingWindows.remove(id)
+        layoutGuard.forget(id)
+        missingWindows.forget(id)
         observerHub.unobserve(window: element)
         log.debug("削除 [\(id)]")
         relayout()
@@ -1434,7 +2736,7 @@ public final class Engine: WindowResolving {
     }
 
     private func performRelayout() {
-        guard let monitor = monitors.primary else { return }
+        guard !monitors.monitors.isEmpty else { return }
 
         // 設定でワークスペースの数が減ると、行き場を失ったウィンドウが
         // 「表示もされず退避もされない」まま画面に残る。表示中の側で引き取る。
@@ -1444,46 +2746,21 @@ public final class Engine: WindowResolving {
             registry.update(id) { $0.workspace = workspaces.activeID }
         }
 
-        let workspace = workspaces.active
-
-        // 最初の分割方向は領域の縦横比で決める
-        // （AeroSpace の default-root-container-orientation = auto 相当）。
-        // 空のうちだけ決め直す。ウィンドウが載っている状態で向きを変えると全部動く。
-        //
-        // 明示指定も併せて捨てる。ルートは `absorb` で子から向きを引き継ぐので、
-        // 入れ子で選ばれた向きがルートに残り続けると自動判定が二度と効かなくなる。
-        if root.isEmpty {
-            root.isOrientationExplicit = false
-            root.orientation = defaultOrientation.resolve(for: monitor.visibleFrame.size)
-        }
-
-        // 台帳とツリーを一致させる。追加も削除もここへ集まるので、
-        // どの経路で状態が変わってもツリーだけがずれることがない。
-        //
-        // 挿入の基準はツリーの中のノードでなければ意味がない。フォーカスが
-        // ダイアログなど管理外のウィンドウにあるときは、最後にフォーカスした
-        // タイル対象へ落とす（`focusedNode()` がその面倒を見る）。
-        let change = TreeSync.reconcile(
-            root: root, tiled: registry.tiledIDs(in: workspace.id),
-            focused: focusedNode()?.windowID,
-            strategy: insertionStrategy, normalization: normalization)
-        if !change.isEmpty {
-            for id in change.removed {
-                // 管理から外れたウィンドウを「外部から動かされた」と誤認して
-                // 引き戻さないよう、戻し先を捨てる。
-                desiredFrames.removeValue(forKey: id)
-            }
-            workspace.isLayoutDirty = true
-            log.debug("ツリーを更新: 追加 \(change.inserted) 削除 \(change.removed) → \(treeDescription)")
-        }
-
         var targets: [CGWindowID: TargetFrame] = [:]
         var order: [CGWindowID] = []
 
         // 見えるほうから先に積む。切替では表示側が先に動いたほうが速く見える。
-        appendVisibleTargets(for: workspace, monitor: monitor, into: &targets, order: &order)
-        // 表示中でないワークスペースのウィンドウは画面の外へ逃がす。
-        appendStashTargets(excluding: workspace.id, into: &targets, order: &order)
+        // **モニタの並び順で回す。** 順序が揺れると適用順が実行ごとに変わる。
+        for pair in workspaces.visiblePairs {
+            guard let monitor = monitors.monitor(id: pair.monitor) ?? monitors.primary else {
+                continue
+            }
+            syncTree(of: pair.workspace, on: monitor)
+            appendVisibleTargets(
+                for: pair.workspace, monitor: monitor, into: &targets, order: &order)
+        }
+        // どのモニタにも映っていないワークスペースのウィンドウは画面の外へ逃がす。
+        appendStashTargets(excluding: workspaces.visibleIDs, into: &targets, order: &order)
 
         guard !isDryRun else {
             logDryRun(targets: targets, order: order)
@@ -1516,6 +2793,54 @@ public final class Engine: WindowResolving {
             }
         }
         notifyFocusedFrame()
+        notifyTiledFrames()
+        // ウィンドウの増減で「どの番号に居るか」が変わる。再配置は増減のたびに
+        // 通るので、ここで差分だけ伝える。
+        notifyVisibleWorkspacesIfChanged()
+    }
+
+    /// 台帳とツリーを一致させる。
+    ///
+    /// 追加も削除もここへ集まるので、どの経路で状態が変わってもツリーだけがずれない。
+    private func syncTree(of workspace: Workspace, on monitor: MonitorManager.Monitor) {
+        let root = workspace.root
+
+        // 最初の分割方向は領域の縦横比で決める
+        // （AeroSpace の default-root-container-orientation = auto 相当）。
+        // 空のうちだけ決め直す。ウィンドウが載っている状態で向きを変えると全部動く。
+        //
+        // 明示指定も併せて捨てる。ルートは `absorb` で子から向きを引き継ぐので、
+        // 入れ子で選ばれた向きがルートに残り続けると自動判定が二度と効かなくなる。
+        if root.isEmpty {
+            root.isOrientationExplicit = false
+            root.orientation = defaultOrientation.resolve(for: monitor.visibleFrame.size)
+        }
+
+        // 挿入の基準はツリーの中のノードでなければ意味がない。フォーカスが
+        // ダイアログなど管理外のウィンドウにあるときは、最後にフォーカスした
+        // タイル対象へ落とす（`focusedNode()` がその面倒を見る）。
+        // **基準はそのワークスペースの中のウィンドウに限る**（別のモニタの
+        // フォーカスを基準にすると、入る場所が読めなくなる）。
+        let focusedInThisWorkspace = focusedNode()?.windowID
+        let anchor = focusedInThisWorkspace.flatMap { root.findWindow($0) != nil ? $0 : nil }
+        let change = TreeSync.reconcile(
+            root: root, tiled: registry.tiledIDs(in: workspace.id),
+            focused: anchor,
+            strategy: insertionStrategy, normalization: normalization,
+            split: pendingSplit)
+        if !change.inserted.isEmpty {
+            // 予約は1枚で使い切る（i3 も split したあと1枚入れば解除される）。
+            pendingSplit = nil
+        }
+        guard !change.isEmpty else { return }
+        for id in change.removed {
+            // 管理から外れたウィンドウを「外部から動かされた」と誤認して
+            // 引き戻さないよう、戻し先を捨てる。
+            desiredFrames.removeValue(forKey: id)
+        }
+        workspace.isLayoutDirty = true
+        log.debug(
+            "ws\(workspace.id) のツリーを更新: 追加 \(change.inserted) 削除 \(change.removed) → \(root)")
     }
 
     /// 表示中のワークスペースの目標矩形を積む。
@@ -1525,10 +2850,10 @@ public final class Engine: WindowResolving {
         into targets: inout [CGWindowID: TargetFrame],
         order: inout [CGWindowID]
     ) {
-        // 復帰直後で、非アクティブ中に何も起きていなければ位置の設定だけで足りる。
+        let root = workspace.root
+        // 復帰直後で、非表示中に何も起きていなければ位置の設定だけで足りる。
         // サイズを省くと1ウィンドウあたりの IPC が2回から1回に減る（症状C の対策）。
-        let isRestoring = isRestoringWorkspace
-        isRestoringWorkspace = false
+        let isRestoring = restoringWorkspaces.remove(workspace.id) != nil
         let setSize = !isRestoring || workspace.isLayoutDirty
         workspace.isLayoutDirty = false
 
@@ -1542,7 +2867,7 @@ public final class Engine: WindowResolving {
         }
 
         guard !root.isEmpty else {
-            lastLayout = nil
+            lastLayouts.removeValue(forKey: workspace.id)
             return
         }
 
@@ -1557,7 +2882,8 @@ public final class Engine: WindowResolving {
         let layout = LayoutEngine.compute(
             root: root, area: monitor.visibleFrame, gaps: gaps, scale: monitor.scale,
             minimums: minimumSizes, fullscreen: workspace.fullscreenWindowID)
-        lastLayout = layout
+        lastLayouts[workspace.id] = layout
+        reportOverflows(layout.overflows, in: workspace.id)
         guard !layout.order.isEmpty else {
             log.warn(
                 "レイアウトを算出できなかった (ウィンドウ \(root.windowIDs.count) 枚, 領域 \(monitor.visibleFrame))")
@@ -1577,6 +2903,13 @@ public final class Engine: WindowResolving {
                 continue
             }
             // 外部から動かされたときの戻し先として覚えておく。
+            // **目標が変わったら「限界」の記憶を捨てる。** 前の目標に届かなかった
+            // ことは、新しい目標に届かない理由にはならない。
+            if let previous = desiredFrames[id],
+                !Geometry.isApproximatelyEqual(previous, rect, tolerance: 0.5)
+            {
+                toleratedFrames.removeValue(forKey: id)
+            }
             desiredFrames[id] = rect
             stashedFrames.removeValue(forKey: id)
 
@@ -1594,24 +2927,61 @@ public final class Engine: WindowResolving {
         }
     }
 
+    /// 「最小寸法が収まらない」ことを1度だけ伝える。
+    ///
+    /// **黙って重ねてはいけない。** アプリは指定より小さくならないので、合計が
+    /// 領域を超えると必ず隣にはみ出す。画面上はただ重なって見えるだけなので、
+    /// 何が起きているのかと打つ手を出さないと「タイリングが壊れている」と読まれる。
+    ///
+    /// 同じ状態で言い続けるとログが埋まるので、内容が変わったときだけ出す。
+    private func reportOverflows(_ overflows: [LayoutEngine.Overflow], in workspace: WorkspaceID) {
+        // **ワークスペースごとに覚える。** 1つしか覚えないと、2画面で表示中の
+        // ワークスペースが交互に上書きし合い、同じ警告が再配置のたびに出る。
+        guard overflows != reportedOverflows[workspace] else { return }
+        reportedOverflows[workspace] = overflows
+        for overflow in overflows {
+            let axis = overflow.axis == .horizontal ? "幅" : "高さ"
+            let names = overflow.windowIDs.compactMap { id -> String? in
+                guard let record = registry[id] else { return nil }
+                let size = minimumSizes[id]
+                let extent =
+                    overflow.axis == .horizontal ? size?.width : size?.height
+                let name = record.title?.prefix(20) ?? "?"
+                return extent.map { "\(name)=\(Int($0))" } ?? String(name)
+            }
+            log.warn(
+                """
+                ws\(workspace): \(overflow.windowIDs.count) 枚を並べるには\(axis)が\
+                \(Int(overflow.shortfall))pt 足りない\
+                （最小寸法の合計 \(Int(overflow.required))pt / 領域 \(Int(overflow.available))pt）。
+                アプリは指定より小さくならないので**重なる**。内訳: \(names.joined(separator: ", "))
+                1枚をフローティングにする（layout floating tiling）か、
+                別のワークスペースへ移す（move-node-to-workspace N）と収まる。
+                """)
+        }
+    }
+
+    /// 直前に伝えた収まらない分割。同じ内容を繰り返し言わないために持つ。
+    private var reportedOverflows: [WorkspaceID: [LayoutEngine.Overflow]] = [:]
+
     /// 表示中でないワークスペースのウィンドウを退避先へ積む。
     ///
     /// **毎回すべて積み直す。** 合成器が「変化なし」を落とすので IPC は増えないうえ、
     /// モニタ構成が変わって退避先が動いたときもこれだけで追従する
     ///（積み直しを怠ると退避中のウィンドウが画面の中に現れる）。
     private func appendStashTargets(
-        excluding activeID: WorkspaceID,
+        excluding visible: Set<WorkspaceID>,
         into targets: inout [CGWindowID: TargetFrame],
         order: inout [CGWindowID]
     ) {
         // アプリごと隠せるものは隠す。**隅に 1pt も残らない**のでこちらが本命。
         // 隠せない（表示中のウィンドウも持つ）アプリのぶんだけ隅へ寄せる。
-        let plan = hidePlan(activeID: activeID)
+        let plan = hidePlan(visible: visible)
         applyHidePlan(plan)
 
         let stash = stashOrigin()
         let stashable = Set(plan.stash)
-        for workspace in workspaces.all where workspace.id != activeID {
+        for workspace in workspaces.all where !visible.contains(workspace.id) {
             for id in registry.visibleIDs(in: workspace.id) where stashable.contains(id) {
                 // 初めて退避するときの矩形を覚える。退避すると `observedFrame` は
                 // 退避先で上書きされ、元の位置が分からなくなる。
@@ -1645,7 +3015,7 @@ public final class Engine: WindowResolving {
     ///
     /// 「今どのアプリが非表示か」は**自分の記録ではなく macOS の実態**を見る。
     /// 利用者が Cmd+Tab で戻したときに追従できるようにするため。
-    private func hidePlan(activeID: WorkspaceID) -> HidePlanner.Plan {
+    private func hidePlan(visible: Set<WorkspaceID>) -> HidePlanner.Plan {
         var windows: [HidePlanner.Window] = []
         var hiddenApps: Set<pid_t> = []
 
@@ -1654,6 +3024,7 @@ public final class Engine: WindowResolving {
             // **サブディスプレイのウィンドウも数に入れる。** 数えないと「全ウィンドウが
             // 隠れているアプリ」と判定され、アプリごと非表示にした拍子に
             // サブディスプレイのウィンドウまで消える。
+            // 全モニタを並べる設定ではこの状態にならない（管理下に入る）。
             let onOtherMonitor = record.disposition.isOnOtherMonitor
             guard record.disposition.isTiled || record.disposition.isFloating || onOtherMonitor
             else { continue }
@@ -1667,7 +3038,7 @@ public final class Engine: WindowResolving {
         }
 
         return HidePlanner.plan(
-            windows: windows, activeWorkspace: activeID, hiddenApps: hiddenApps,
+            windows: windows, visibleWorkspaces: visible, hiddenApps: hiddenApps,
             strategy: hiddenWindowStrategy)
     }
 
@@ -1677,13 +3048,33 @@ public final class Engine: WindowResolving {
     /// **隠す前に表示へ戻すほうを先に**行う。順序が逆だと、表示すべきウィンドウが
     /// 一瞬も出ないまま次の非表示に巻き込まれることがある。
     private func applyHidePlan(_ plan: HidePlanner.Plan) {
+        // **dry-run では触らない。** アプリを隠すのは「ウィンドウを動かさない」に
+        // 反する（画面から消える）。他のウィンドウマネージャが動いている環境で
+        // 安全に検証するための逃げ道なので、ここで手を出すと目的を失う。
+        //
+        // 実機で踏んだ: `--dry-run` でワークスペースを切り替えたら、
+        // Parsec・テキストエディット・ターミナルが Cmd+H 相当で消えた。
+        guard !isDryRun else {
+            if !plan.hide.isEmpty || !plan.unhide.isEmpty {
+                log.info(
+                    "[dry-run] 非表示にするアプリ \(plan.hide.count) 個 / "
+                        + "表示に戻すアプリ \(plan.unhide.count) 個（実際には触らない）")
+            }
+            return
+        }
         for pid in plan.unhide {
             guard let app = NSRunningApplication(processIdentifier: pid) else { continue }
+            // **通知が届く前に記録を消す。** 消し忘れると、次に利用者が Cmd+H した
+            // ときに「comet が隠した」と誤認して列から外さない。
+            cometHiddenApps.remove(pid)
             app.unhide()
             log.debug("アプリを表示に戻した pid=\(pid)")
         }
         for pid in plan.hide {
             guard let app = NSRunningApplication(processIdentifier: pid) else { continue }
+            // **隠す前に記録する。** 逆にすると自分が隠したぶんを利用者の Cmd+H と
+            // 誤認して、ワークスペース切替のたびにウィンドウが列から消える。
+            cometHiddenApps.insert(pid)
             app.hide()
             log.debug("アプリを非表示にした pid=\(pid)")
         }
@@ -1700,6 +3091,7 @@ public final class Engine: WindowResolving {
             guard let app = NSRunningApplication(processIdentifier: pid), app.isHidden else {
                 continue
             }
+            cometHiddenApps.remove(pid)
             app.unhide()
             restored += 1
         }
@@ -1718,7 +3110,7 @@ public final class Engine: WindowResolving {
             guard let target = targets[id] else { continue }
             let rect = target.rect
             let title = registry[id]?.title ?? "?"
-            let mark = registry[id]?.workspace == workspaces.activeID ? " " : "退避"
+            let mark = workspaces.isVisible(registry[id]?.workspace ?? -1) ? " " : "退避"
             log.log(
                 level,
                 "\(prefix) \(mark) [\(id)] \(title.prefix(40)) → "
@@ -1799,10 +3191,30 @@ public final class Engine: WindowResolving {
     /// ずれが小さいものは降格させない。文字セル単位への丸めや最小寸法は
     /// 数十 pt で収まるので、それで常用ウィンドウが浮くと驚く。
     /// 大きくずれているものだけを対象にし、恒久的な対処（`window-rule`）を案内する。
+    ///
+    /// - Important: **「目標より大きい」を降格の理由にしてはいけない。**
+    ///   それはアプリに最小寸法があるという意味で、値は ``learnMinimum(_:target:observed:)``
+    ///   が既に覚えている。次の再配置ではその下限を織り込んだ目標になるので、
+    ///   放っておけば収まる。
+    ///
+    ///   実測（Safari）: 幅 476 を要求 → 574 で止まる。同じミリ秒のうちに
+    ///   「最小寸法 574 を学習」と「寸法を無視するので降格」が両方走り、
+    ///   **学習が降格に打ち消されて Safari のウィンドウが勝手に浮いた。**
+    ///
+    ///   降格に値するのは次の2つだけ。
+    ///   - **位置を無視する** … タイル配置として成立しない
+    ///   - **要求より大幅に小さいまま広がらない** … 下限では説明できない
     public func didGiveUp(_ id: CGWindowID, target: CGRect, observed: CGRect) {
-        let gap = max(
-            abs(observed.width - target.width), abs(observed.height - target.height))
-        guard gap > floatingDemotionThreshold, registry[id]?.disposition.isTiled == true else {
+        // **ここが押し合いの終点。** 補正で寄せ切れなかった組み合わせを覚えておき、
+        // 見張りが同じ目標で同じ実測を見たときは「落ち着いている」と扱う。
+        // 覚えないと 20 秒ごとに無駄な往復を繰り返し続ける。
+        toleratedFrames[id] = (target: target, actual: observed)
+
+        guard
+            FloatingDemotion.shouldDemote(
+                target: target, observed: observed, threshold: floatingDemotionThreshold),
+            registry[id]?.disposition.isTiled == true
+        else {
             return
         }
 
@@ -1849,6 +3261,8 @@ public final class Engine: WindowResolving {
     /// 指定した寸法を無視するアプリをツリーから外す。
     private func demoteToFloating(_ id: CGWindowID, target: CGRect, observed: CGRect) {
         let record = registry[id]
+        // 降格は恒久的な判断なので、最小化やワークスペース切替をまたいでも保つ。
+        floatingWindows.insert(id)
         registry.update(id) { $0.disposition = .floating }
         desiredFrames.removeValue(forKey: id)
         log.warn(

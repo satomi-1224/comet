@@ -103,7 +103,7 @@ struct SecondaryMonitorTests {
                 // サブディスプレイにあるので常に見えている
                 HidePlanner.Window(id: 2, pid: 100, workspace: 1, isAlwaysVisible: true),
             ],
-            activeWorkspace: 1, hiddenApps: [], strategy: .hideApp)
+            visibleWorkspaces: [1], hiddenApps: [], strategy: .hideApp)
 
         #expect(plan.hide.isEmpty, "隠すとサブディスプレイのウィンドウも消える")
         #expect(plan.stash == [1], "隠せないぶんは隅へ寄せる")
@@ -113,7 +113,7 @@ struct SecondaryMonitorTests {
     func subDisplayWindowIsNeverStashed() {
         let plan = HidePlanner.plan(
             windows: [HidePlanner.Window(id: 2, pid: 100, workspace: 2, isAlwaysVisible: true)],
-            activeWorkspace: 1, hiddenApps: [], strategy: .hideApp)
+            visibleWorkspaces: [1], hiddenApps: [], strategy: .hideApp)
 
         #expect(plan.hide.isEmpty)
         #expect(plan.stash.isEmpty, "サブディスプレイは触らない")
@@ -123,7 +123,7 @@ struct SecondaryMonitorTests {
     func appIsUnhiddenWhenItHasSubDisplayWindow() {
         let plan = HidePlanner.plan(
             windows: [HidePlanner.Window(id: 2, pid: 100, workspace: 1, isAlwaysVisible: true)],
-            activeWorkspace: 1, hiddenApps: [100], strategy: .hideApp)
+            visibleWorkspaces: [1], hiddenApps: [100], strategy: .hideApp)
 
         #expect(plan.unhide == [100])
     }
@@ -135,9 +135,37 @@ struct SecondaryMonitorTests {
                 HidePlanner.Window(id: 1, pid: 100, workspace: 2),
                 HidePlanner.Window(id: 2, pid: 100, workspace: 3),
             ],
-            activeWorkspace: 1, hiddenApps: [], strategy: .hideApp)
+            visibleWorkspaces: [1], hiddenApps: [], strategy: .hideApp)
 
         #expect(plan.hide == [100])
         #expect(plan.stash.isEmpty)
+    }
+}
+
+/// `CGWindowList` から持ち主のプロセスを読む。
+///
+/// 取りこぼしたウィンドウを見つけるのに要る（``MissingWindowFinder``）。
+@Suite("画面一覧の持ち主")
+struct ScreenWindowsOwnerTests {
+
+    @Test("持ち主のプロセスを読む")
+    func readsTheOwnerPID() {
+        let parsed = ScreenWindows.parse([
+            [
+                kCGWindowNumber as String: CGWindowID(7),
+                kCGWindowLayer as String: 0,
+                kCGWindowOwnerPID as String: pid_t(4321),
+            ]
+        ])
+        #expect(parsed[7]?.ownerPID == 4321)
+    }
+
+    /// 持ち主が読めないものを 0 にしておくと、拾い直しの対象から自然に外れる。
+    @Test("持ち主が無ければ 0")
+    func missingOwnerBecomesZero() {
+        let parsed = ScreenWindows.parse([
+            [kCGWindowNumber as String: CGWindowID(8), kCGWindowLayer as String: 0]
+        ])
+        #expect(parsed[8]?.ownerPID == 0)
     }
 }

@@ -93,6 +93,28 @@ public enum SyntheticEvents {
         return sent
     }
 
+    /// ポインタを動かす。座標は AX と同じ左上原点。**ボタンは押さない。**
+    ///
+    /// `focus-follows-mouse` の検証に使う。`CGWarpMouseCursorPosition` では
+    /// 移動イベントが出ないので、乗ったことを知らせるには `mouseMoved` を送る必要がある。
+    ///
+    /// - Parameter steps: 途中の点も送る回数。1点だけだと、通り道にある
+    ///   ウィンドウを跨いだことにならず、追従の判定を通らないことがある。
+    public static func postMouseMove(
+        to point: CGPoint, steps: Int = 3, interval: TimeInterval = 0.02
+    ) {
+        let source = CGEventSource(stateID: .hidSystemState)
+        for _ in 0..<max(1, steps) {
+            guard
+                let event = CGEvent(
+                    mouseEventSource: source, mouseType: .mouseMoved,
+                    mouseCursorPosition: point, mouseButton: .left)
+            else { return }
+            event.post(tap: .cghidEventTap)
+            Thread.sleep(forTimeInterval: interval)
+        }
+    }
+
     /// 指定座標から指定座標へドラッグする。座標は AX と同じ左上原点。
     ///
     /// ウィンドウの縁を掴むリサイズを再現するために使う。

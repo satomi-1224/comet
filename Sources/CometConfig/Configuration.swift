@@ -37,14 +37,17 @@ public struct Problem: Sendable, Equatable, CustomStringConvertible {
         case invalidValue
         /// ウィンドウルールとして成立していない。
         case invalidRule
-        /// まだ実装していないモード。
-        case unsupportedMode
         /// 設定ファイルそのものを読めない。
         case unreadable
         /// キーバインドが1つも無い。
         case noBindings
         /// 綴りは知っているが、まだ効かない設定項目。
         case unsupportedOption
+        /// 知らない項目名。**綴り間違いはこれで気付く。**
+        ///
+        /// `Decodable` は知らないキーを黙って捨てるので、照合しないと
+        /// 「設定したのに効かない」だけが残る。
+        case unknownKey
     }
 
     public let kind: Kind
@@ -74,6 +77,11 @@ public struct Configuration: Sendable, Equatable {
     public var workspaceCount = 10
     /// 非表示ワークスペースのウィンドウがアクティブになったらそちらへ移るか。
     public var focusFollowsActivation = true
+    /// 表示中のワークスペースの番号をもう一度押したら直前へ戻るか
+    ///（i3 の `workspace_auto_back_and_forth`）。
+    public var workspaceAutoBackAndForth = false
+    /// ワークスペース番号 → 名前。インジケータの表示にだけ使う。
+    public var workspaceNames: [WorkspaceID: String] = [:]
     public var hiddenWindowStrategy = HiddenWindowStrategy.hideApp
     /// 設定に書かれていなければ `nil`。コマンドライン引数の指定を上書きしないため。
     public var logLevel: LogLevel?
@@ -81,6 +89,8 @@ public struct Configuration: Sendable, Equatable {
     public var border = BorderStyle()
     public var indicator = IndicatorStyle.both
     public var hudDuration: TimeInterval = 0.4
+    /// 並べる対象のディスプレイ。既定は全部（i3 と同じ）。
+    public var monitorScope: MonitorScope = .all
     /// ワークスペース番号 → 壁紙のパス。**実在の検証は読み込み側で行う。**
     public var wallpapers: [WorkspaceID: String] = [:]
     /// 壁紙を入れたディレクトリ。名前順にワークスペースへ割り当てる。
@@ -90,7 +100,30 @@ public struct Configuration: Sendable, Equatable {
     public var focusCycleReset: TimeInterval = 1.5
     /// 巡回の対象範囲。
     public var focusCycleScope: FocusCycleScope = .activeWorkspace
-    public var bindings: [Binding] = []
+    /// ポインタが乗ったウィンドウへフォーカスを移すか（i3 の `focus_follows_mouse`）。
+    ///
+    /// **i3 の既定は有効だが、comet では無効を既定にしている。** macOS は
+    /// クリックでフォーカスを移す前提で作られており、乗せただけで前面が変わると
+    /// 「触っていないのにウィンドウが入れ替わる」と受け取られやすい。
+    public var focusFollowsMouse = false
+    /// 方向フォーカスが端で反対側へ回るか（i3 の `focus_wrapping`）。
+    ///
+    /// **i3 の既定は有効だが、comet では無効を既定にしている。**
+    /// 回ると「右端で右を押したら左端へ飛ぶ」ことになり、行き先が読めない。
+    public var focusWrapping = false
+    /// モード名 → バインド。`main` が既定の層。
+    ///
+    /// **i3 の `mode "resize"` に相当する層。** 層の中では修飾キーなしのキーも奪う。
+    public var modes: [String: [Binding]] = [:]
+
+    /// 既定の層のバインド。
+    public var bindings: [Binding] {
+        get { modes[Configuration.mainMode] ?? [] }
+        set { modes[Configuration.mainMode] = newValue }
+    }
+
+    /// 既定の層の名前。
+    public static let mainMode = "main"
     public var windowRules: [WindowRule] = []
     public var problems: [Problem] = []
 
@@ -139,6 +172,22 @@ public struct Configuration: Sendable, Equatable {
         #   "all"       全ワークスペース（行き先のワークスペースへ自動で切り替わる）
         cycle-scope = "workspace"
 
+        # ポインタが乗ったウィンドウへフォーカスを移す（i3 の focus_follows_mouse）。
+        # i3 の既定は有効だが、macOS はクリックでフォーカスを移す前提なので
+        # comet では無効を既定にしている。
+        follows-mouse = false
+
+        # 方向フォーカスが端で反対側へ回る（i3 の focus_wrapping）。
+        # 2枚だけ並べているときに alt-h / alt-l で往復できる。
+        # 既定は無効（回ると行き先が押す前に読めない）。
+        wrapping = false
+
+        [monitors]
+        # 並べる対象のディスプレイ
+        #   "all"  すべて並べる（i3 と同じ。既定）
+        #   "main" メインディスプレイだけを並べ、他は素の macOS のまま使う
+        manage = "all"
+
         [workspaces]
         count = 10
 
@@ -154,6 +203,16 @@ public struct Configuration: Sendable, Equatable {
         # 非表示ワークスペースのウィンドウが Cmd+Tab などでアクティブになったら
         # そのワークスペースへ移る。切ると「アプリは前面だが見えない」状態になる。
         focus-follows-activation = true
+
+        # 表示中の番号をもう一度押したら直前のワークスペースへ戻る
+        # （i3 の workspace_auto_back_and_forth）。押し間違いの取り消しにもなる。
+        auto-back-and-forth = false
+
+        # ワークスペースの名前。メニューバーと HUD の表示にだけ使う
+        # （番号は変わらない）。書いた番号だけに付く。
+        [workspaces.names]
+        # 1 = "web"
+        # 2 = "code"
 
         [gaps]
         # アプリ間の間隔。**枠線の幅（[border] width）より広くしておく。**
@@ -189,8 +248,13 @@ public struct Configuration: Sendable, Equatable {
 
         # ---- キーバインド ----
         #
-        # 未対応のコマンド（fullscreen / move-node-to-monitor）は書いてあっても飛ばされ、
-        # 起動時のログに「未対応」として残る。
+        # コマンドの綴りは AeroSpace 互換で、i3 の綴りも受ける
+        # （`kill` / `reload` / `split h` / `fullscreen toggle` /
+        #  `floating toggle` / `resize grow width 50 px` /
+        #  `move container to workspace 3` / `move workspace to output right` など）。
+        #
+        # 綴りは知っているが comet に無いコマンド（macos-native-fullscreen など）は
+        # 飛ばされ、起動時のログに「未対応」として残る。綴り間違いは1件ずつ警告に出る。
 
         [mode.main.binding]
         # -- フォーカス移動 --
@@ -221,12 +285,40 @@ public struct Configuration: Sendable, Equatable {
         alt-e = "join-with right"
         alt-w = "join-with down"
 
+        # -- 次のウィンドウの入り方（i3 の split h / split v） --
+        # その場では何も起きない。次に開いた1枚がこの向きに入る。
+        alt-b = "split horizontal"
+        alt-v = "split vertical"
+
+        # -- コンテナを選ぶ（i3 の focus parent / focus child） --
+        # 上げると入れ子ごと move / resize / layout の対象になる。枠線が範囲を示す。
+        alt-a       = "focus parent"
+        alt-shift-a = "focus child"
+
+        # -- タイルとフローティングの間でフォーカスを往復（i3 の focus mode_toggle） --
+        alt-space = "focus mode-toggle"
+
         # -- レイアウト切替 --
         alt-slash   = "layout tiles horizontal vertical"
         alt-shift-f = "layout floating tiling"
+        # 入れ子を全部ほどいてルート直下に並べ直す（収拾がつかなくなったとき）
+        alt-shift-slash = "flatten-workspace-tree"
+
+        # -- アプリを起動する（i3 の $mod+Return） --
+        # exec は残りを1行そのままシェルへ渡す。空白も引用符も書いたまま。
+        # launchd から起動した場合 PATH は最小限なので、絶対パスか open -a を使う。
+        alt-enter = "exec open -a Terminal"
+
+        # -- モニタ間の移動（i3 の output。2台以上のときだけ効く） --
+        alt-s       = "focus-monitor next"
+        alt-shift-s = "move-node-to-monitor next"
+        alt-ctrl-s  = "move-workspace-to-monitor next"
 
         # -- ワークスペース --
-        alt-tab = "workspace back-and-forth"
+        alt-tab    = "workspace back-and-forth"
+        # 番号順に送る。端では巻き戻る。
+        alt-period = "workspace next"
+        alt-comma  = "workspace prev"
         alt-1 = "workspace 1"
         alt-2 = "workspace 2"
         alt-3 = "workspace 3"
@@ -252,19 +344,56 @@ public struct Configuration: Sendable, Equatable {
         # -- 全画面（1枚を領域いっぱいに広げる。トグル） --
         alt-semicolon = "fullscreen"
 
-        # -- その他（未対応: 2台目のモニタが要る） --
-        alt-s         = "move-node-to-monitor next"
-        alt-a         = "move-node-to-monitor main"
+        # -- 分割の比率を均等に戻す --
+        alt-shift-e = "balance-sizes"
+
+        # -- フローティングのウィンドウを中央へ（i3 の move position center） --
+        # フローティング中は alt-shift-hjkl が「点数で動かす」に変わる。
+        alt-c = "move position center"
+
+        # -- ウィンドウを閉じる --
+        alt-shift-q = "close-window"
+
+        # -- リサイズモードへ入る（i3 の mode "resize"） --
+        alt-r = "mode resize"
+
+        # ---- キーの層（i3 の mode） ----
+        #
+        # **層の中では修飾キーなしのキーも奪う。** それが層の目的で、
+        # `h` だけで境界を動かせるようになる。
+        # 抜けるキーを書き忘れても `esc` では戻れるようにしてある。
+        [mode.resize.binding]
+        h = "resize width -50"
+        j = "resize height +50"
+        k = "resize height -50"
+        l = "resize width +50"
+        # 大きく動かす
+        shift-h = "resize width -150"
+        shift-j = "resize height +150"
+        shift-k = "resize height -150"
+        shift-l = "resize width +150"
+        esc   = "mode main"
+        enter = "mode main"
 
         # ---- ウィンドウルール ----
         #
+        # 初めて見るウィンドウにだけ当たる（手で戻した選択を上書きしない）。
+        #
         # if-app-id                 バンドル ID の完全一致
-        # if-window-title-substring タイトルの部分一致（正規表現ではない）
-        # run                       今は "layout floating" のみ
+        # if-window-title-substring タイトルの部分一致
+        # if-window-title-regex     タイトルの正規表現（部分一致）
+        # run                       "layout floating" … 並べずに浮かせる
+        #                           "move-node-to-workspace <番号>" … 置き場所を固定する
+        #                           （i3 の assign）
 
         [[window-rule]]
         if-app-id = "com.apple.systempreferences"
         run       = "layout floating"
+
+        # 置き場所を固定する例（i3 の assign）。
+        # [[window-rule]]
+        # if-app-id = "com.tinyspeck.slackmacgap"
+        # run       = "move-node-to-workspace 9"
 
         # ---- 見た目 ----
 
@@ -273,7 +402,9 @@ public struct Configuration: Sendable, Equatable {
         width         = 2.0
         radius        = 10.0
         color-focused = "#7aa2f7"
-        # タイル全部に枠を描く color-unfocused は未対応
+        # フォーカスしていないタイルにも枠を描く（i3 と同じ見え方）。
+        # 書かなければフォーカス中の1枚だけに枠が出る。
+        # color-unfocused = "#3b4261"
 
         [indicator]
         # "menubar" | "hud" | "both" | "off"

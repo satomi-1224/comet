@@ -172,8 +172,27 @@ struct LaunchOptionsTests {
     @Test("usage は全フラグに言及する")
     func usageMentionsEveryFlag() {
         let usage = LaunchOptions.usage
-        for flag in ["--log-level", "--hotkey", "--print-keys", "--help"] {
+        for flag in [
+            "--log-level", "--hotkey", "--print-keys", "--help", "--send", "--query",
+        ] {
             #expect(usage.contains(flag), "usage に \(flag) の記載がない")
+        }
+    }
+
+    // 外から comet を動かす口（i3 の i3-msg 相当）。
+    @Test("送信と問い合わせを受け取る")
+    func parsesSendAndQuery() throws {
+        #expect(try LaunchOptions.parse(["--send", "focus left"]).send == "focus left")
+        #expect(try LaunchOptions.parse(["--send=workspace 3"]).send == "workspace 3")
+        #expect(try LaunchOptions.parse(["--query", "workspaces"]).query == "workspaces")
+        #expect(try LaunchOptions.parse(["--query=tree"]).query == "tree")
+        #expect(try LaunchOptions.parse([]).send == nil)
+    }
+
+    @Test("値の無い --send は欠落として弾く")
+    func sendNeedsAValue() {
+        #expect(throws: LaunchOptionsError.missingValue(flag: "--send")) {
+            try LaunchOptions.parse(["--send"])
         }
     }
 }

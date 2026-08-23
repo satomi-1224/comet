@@ -163,8 +163,13 @@ public final class HotkeyManager {
         }
     }
 
+    /// - Parameter warnIfUnmodified: 修飾キーを伴わないバインドを警告するか。
+    ///   **モード（キーの層）の中では警告しない。** そこでは修飾なしのキーを
+    ///   奪うのが目的なので、毎回警告すると狼少年になる。
     @discardableResult
-    public func register(_ hotkey: Hotkey, handler: @escaping Handler) throws -> UInt32 {
+    public func register(
+        _ hotkey: Hotkey, warnIfUnmodified: Bool = true, handler: @escaping Handler
+    ) throws -> UInt32 {
         // start() を呼ばずに登録すると、RegisterEventHotKey 自体は成功して
         // そのキーをシステム全体から奪う一方、配送先のハンドラが存在しない。
         // 「そのキーだけ何も起きなくなる」という追跡困難な状態になるので拒否する。
@@ -176,7 +181,7 @@ public final class HotkeyManager {
             throw ManagerError.alreadyRegistered(hotkey)
         }
 
-        if KeySpec.isRisky(hotkey) {
+        if warnIfUnmodified, KeySpec.isRisky(hotkey) {
             log.warn(
                 """
                 \(hotkey) は修飾キー（cmd / alt / ctrl）を伴わないため、

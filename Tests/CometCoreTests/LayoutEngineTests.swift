@@ -483,3 +483,106 @@ struct LayoutEngineTests {
         }
     }
 }
+
+/// 最小寸法が収まらない状態の検出。
+///
+/// **macOS 固有の問題。** X11 のクライアントは WM の指定に従うが、macOS のアプリは
+/// 指定より小さくならない（実測: Safari は幅 574、Parsec は 640 が下限）。合計が
+/// 領域を超えると、どう配ってもウィンドウが隣にはみ出す。
+///
+/// 画面上はただ重なって見えるだけなので、**黙っていると「タイリングが壊れている」と
+/// 読まれる。** 事実として持ち出して、打つ手を伝えられるようにする。
+@Suite("収まらない配置の検出")
+struct LayoutOverflowTests {
+
+    private let area = CGRect(x: 0, y: 0, width: 1000, height: 800)
+
+    private func compute(
+        _ root: ContainerNode, minimums: [CGWindowID: CGSize]
+    ) -> LayoutEngine.Result {
+        LayoutEngine.compute(root: root, area: area, gaps: .zero, scale: 1, minimums: minimums)
+    }
+
+    @Test("収まるなら何も報告しない")
+    func nothingIsReportedWhenItFits() {
+        let root = ContainerNode(
+            orientation: .horizontal, children: [WindowNode(1), WindowNode(2)])
+        let result = compute(
+            root, minimums: [1: CGSize(width: 300, height: 0), 2: CGSize(width: 300, height: 0)])
+        #expect(result.overflows.isEmpty)
+    }
+
+    /// 実機で踏んだ形。Parsec 640 + ターミナル 381 + Safari 574 × 2 = 2169pt を
+    /// 幅 1905pt に並べようとして、3か所で 70pt ずつ重なった。
+    @Test("最小寸法の合計が領域を超えたら報告する")
+    func anOverflowIsReported() throws {
+        let root = ContainerNode(
+            orientation: .horizontal,
+            children: [WindowNode(1), WindowNode(2), WindowNode(3)])
+        let result = compute(
+            root,
+            minimums: [
+                1: CGSize(width: 640, height: 0),
+                2: CGSize(width: 574, height: 0),
+                3: CGSize(width: 574, height: 0),
+            ])
+        let overflow = try #require(result.overflows.first)
+        #expect(overflow.axis == .horizontal)
+        #expect(overflow.windowIDs == [1, 2, 3])
+        #expect(overflow.required == 1788)
+        #expect(overflow.available == 1000)
+        #expect(overflow.shortfall == 788)
+    }
+
+    /// 直交する分割では領域を**共有する**ので、幅の下限は合計ではなく最大値。
+    @Test("直交する分割は合計しない")
+    func perpendicularSplitsShareTheirExtent() {
+        let root = ContainerNode(
+            orientation: .horizontal,
+            children: [
+                WindowNode(1),
+                ContainerNode(orientation: .vertical, children: [WindowNode(2), WindowNode(3)]),
+            ])
+        // 縦に積んだ 2 と 3 は幅を共有するので、幅の下限は 400。合計 800 で収まる。
+        let result = compute(
+            root,
+            minimums: [
+                1: CGSize(width: 400, height: 0),
+                2: CGSize(width: 400, height: 0),
+                3: CGSize(width: 400, height: 0),
+            ])
+        #expect(result.overflows.isEmpty)
+    }
+
+    /// 入れ子の内側だけが収まらないこともある。**そのコンテナだけを報告する。**
+    @Test("収まらない分割だけを報告する")
+    func onlyTheOffendingSplitIsReported() throws {
+        let inner = ContainerNode(
+            orientation: .vertical, children: [WindowNode(2), WindowNode(3)])
+        let root = ContainerNode(orientation: .horizontal, children: [WindowNode(1), inner])
+        let result = compute(
+            root,
+            minimums: [
+                1: CGSize(width: 400, height: 0),
+                2: CGSize(width: 0, height: 600),
+                3: CGSize(width: 0, height: 600),
+            ])
+        let overflow = try #require(result.overflows.first)
+        #expect(result.overflows.count == 1)
+        #expect(overflow.axis == .vertical)
+        #expect(overflow.windowIDs == [2, 3])
+    }
+
+    /// 報告しても**配置そのものは止めない。** 重なってでも並べるほうが、
+    /// 何も動かないより分かりやすい。
+    @Test("報告しても矩形は出す")
+    func framesAreStillProduced() {
+        let root = ContainerNode(
+            orientation: .horizontal, children: [WindowNode(1), WindowNode(2)])
+        let result = compute(
+            root, minimums: [1: CGSize(width: 900, height: 0), 2: CGSize(width: 900, height: 0)])
+        #expect(!result.overflows.isEmpty)
+        #expect(result.frames.count == 2)
+        #expect(result.order == [1, 2])
+    }
+}

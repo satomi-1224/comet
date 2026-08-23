@@ -63,6 +63,18 @@ public enum Direction: String, Sendable, Equatable, CaseIterable {
         }
     }
 
+    /// この方向へ `points` だけ動かすときの差分。
+    ///
+    /// AX 座標系（Y は下向き）なので `up` は負、`down` は正になる。
+    public func offset(points: CGFloat) -> CGSize {
+        switch self {
+        case .left: CGSize(width: -points, height: 0)
+        case .right: CGSize(width: points, height: 0)
+        case .up: CGSize(width: 0, height: -points)
+        case .down: CGSize(width: 0, height: points)
+        }
+    }
+
     public var opposite: Direction {
         switch self {
         case .left: .right

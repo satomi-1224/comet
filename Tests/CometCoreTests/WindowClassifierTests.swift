@@ -237,3 +237,39 @@ struct WindowClassifierTests {
         #expect(!WindowDisposition.unmanaged(.unknownRole).showsFocusBorder)
     }
 }
+
+/// 利用者がアプリごと隠した状態（Cmd+H）。
+///
+/// **AX からは分からない。** 隠されてもウィンドウは生きたまま同じ矩形を返すので、
+/// `NSRunningApplication.isHidden` を見る `Engine` 側で重ねる。
+/// 判定そのものは最小化と同じ扱い（一時的な理由）にする。
+@Suite("利用者が隠したアプリ")
+struct UserHiddenTests {
+
+    @Test("列から外れ、フォーカスも枠線も対象外")
+    func userHiddenIsOutOfTheLayout() {
+        let disposition = WindowDisposition.unmanaged(.userHidden)
+        #expect(!disposition.isTiled)
+        #expect(!disposition.isFloating)
+        #expect(!disposition.acceptsFocusTracking)
+        #expect(!disposition.showsFocusBorder)
+    }
+
+    /// 表示に戻したらタイルへ戻す必要があるので、一時的な理由として扱う。
+    @Test("表示に戻せば解消する一時的な理由")
+    func userHiddenIsTransient() {
+        #expect(UnmanagedReason.userHidden.isTransient)
+    }
+
+    /// 隅寄せの対象にもしない。**隠れているものを動かす意味が無い**うえ、
+    /// 動かすと戻し先の記録（`stashedFrames`）を退避先で上書きしてしまう。
+    @Test("退避の計画にも入らない")
+    func userHiddenWindowsAreNotStashed() {
+        // `HidePlanner` へ渡すのはタイルとフローティングだけ（`Engine.hidePlan`）。
+        // 利用者が隠したアプリのウィンドウはそのどちらでもない。
+        let plan = HidePlanner.plan(
+            windows: [], visibleWorkspaces: [1], hiddenApps: [42], strategy: .hideApp)
+        // 渡すウィンドウが無いアプリは、隠れていても表示へ戻されない。
+        #expect(plan.isEmpty)
+    }
+}

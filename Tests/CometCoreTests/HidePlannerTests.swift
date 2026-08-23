@@ -19,11 +19,13 @@ struct HidePlannerTests {
     private func plan(
         _ windows: [HidePlanner.Window],
         active: WorkspaceID = 1,
+        visible: Set<WorkspaceID>? = nil,
         hidden: Set<pid_t> = [],
         strategy: HiddenWindowStrategy = .hideApp
     ) -> HidePlanner.Plan {
         HidePlanner.plan(
-            windows: windows, activeWorkspace: active, hiddenApps: hidden, strategy: strategy)
+            windows: windows, visibleWorkspaces: visible ?? [active], hiddenApps: hidden,
+            strategy: strategy)
     }
 
     // MARK: - アプリごと隠せる場合

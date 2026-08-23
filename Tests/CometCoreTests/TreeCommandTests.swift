@@ -485,7 +485,7 @@ struct TreeCommandTests {
         #expect(try Command.parse("workspace 1") == .workspace(.index(1)))
         #expect(try Command.parse("workspace 10") == .workspace(.index(10)))
         #expect(try Command.parse("workspace back-and-forth") == .workspace(.backAndForth))
-        #expect(try Command.parse("move-node-to-workspace 3") == .moveNodeToWorkspace(3))
+        #expect(try Command.parse("move-node-to-workspace 3") == .moveNodeToWorkspace(.index(3)))
     }
 
     @Test("ワークスペース番号は 1 以上でなければならない")
@@ -504,7 +504,13 @@ struct TreeCommandTests {
             "focus left", "move down", "resize width +50", "resize height -50",
             "join-with right", "layout tiles horizontal vertical", "layout floating tiling",
             "workspace 3", "workspace back-and-forth", "move-node-to-workspace 7",
-            "close-window", "reload-config",
+            "close-window", "reload-config", "fullscreen",
+            "workspace next", "workspace prev",
+            "move-node-to-workspace next", "move-node-to-workspace prev",
+            "move-node-to-workspace back-and-forth",
+            "exec open -a Terminal", "flatten-workspace-tree",
+            "focus parent", "focus child", "focus mode-toggle",
+            "split horizontal", "split vertical", "split opposite",
         ]
         for spec in specs {
             let command = try Command.parse(spec)
@@ -515,14 +521,25 @@ struct TreeCommandTests {
 
     @Test("未実装のコマンドは未対応として区別できる")
     func parseReportsUnsupportedCommands() {
-        // fullscreen は実装済みなのでここには入れない（実装したら必ず外すこと）。
-        for spec in ["mode resize", "move-node-to-monitor next", "focus-monitor next"] {
+        // 実装したものはここから外すこと。**残っているのは macOS のネイティブ機能に
+        // 寄せたものと、comet の設計と噛み合わないものだけ。**
+        for spec in [
+            "macos-native-fullscreen", "macos-native-minimize", "summon-workspace 3",
+            "volume up", "enable toggle", "trigger-binding a", "debug-windows",
+        ] {
             let name = String(spec.split(separator: " ")[0])
             #expect(throws: Command.ParseError.unsupported(name: name), "\"\(spec)\"") {
                 try Command.parse(spec)
             }
         }
-        #expect(Command.ParseError.unsupported(name: "mode").description.contains("未対応"))
+        #expect(
+            Command.ParseError.unsupported(name: "macos-native-fullscreen")
+                .description.contains("未対応"))
+        // 綴りだけ受けて実装の無い layout の引数も未対応として伝える。
+        // 黙って受けると、押しても「向きが無い」と言われるだけで原因が分からない。
+        #expect(throws: Command.ParseError.unsupported(name: "layout accordion")) {
+            try Command.parse("layout accordion")
+        }
     }
 
     @Test("layout の引数から向きの候補を取り出せる")

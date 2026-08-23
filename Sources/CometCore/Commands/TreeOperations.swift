@@ -12,19 +12,36 @@ public enum TreeOperations {
     /// 方向フォーカスの行き先。木は変えない。
     ///
     /// 自分の親から順に、向きが一致する祖先を探して隣を見る。見つからなければ `nil`。
-    /// 隣接モニタへの移動は未対応。
-    public static func focusTarget(from node: WindowNode, direction: Direction) -> WindowNode? {
+    ///
+    /// - Parameters:
+    ///   - node: 起点。`focus parent` でコンテナを選んでいるときはコンテナが来る
+    ///     （i3 と同じく、そこから隣へ出る）。行き先は必ず葉。
+    ///   - wrapping: 端まで来たら反対の端へ回るか（i3 の `focus_wrapping`）。
+    ///     **回るのは向きの合う一番内側のコンテナの中だけ。** ワークスペース全体で
+    ///     回すと、右端で `right` を押したときに左端まで飛んで面食らう。
+    public static func focusTarget(
+        from node: Node, direction: Direction, wrapping: Bool = false
+    ) -> WindowNode? {
         var current: Node = node
+        /// 端に当たった一番内側のコンテナ。巻き戻す先を決めるために覚えておく。
+        var innermostEdge: (container: ContainerNode, index: Int)?
         while let parent = current.parent {
             if parent.orientation == direction.orientation, let index = parent.index(of: current) {
                 let next = direction.isForward ? index + 1 : index - 1
                 if parent.children.indices.contains(next) {
                     return descendToLeaf(parent.children[next])
                 }
+                if innermostEdge == nil, parent.children.count > 1 {
+                    innermostEdge = (parent, index)
+                }
             }
             current = parent
         }
-        return nil
+        guard wrapping, let edge = innermostEdge else { return nil }
+        // 端に居るので反対の端へ回る。
+        let wrapped = direction.isForward ? 0 : edge.container.children.count - 1
+        guard wrapped != edge.index else { return nil }
+        return descendToLeaf(edge.container.children[wrapped])
     }
 
     /// コンテナへ降りるときの行き先。**最後にフォーカスした葉**を選ぶ。
@@ -51,9 +68,11 @@ public enum TreeOperations {
     /// | 自分の親の中で、隣がコンテナ | そのコンテナの近い端へ入る |
     /// | 何段か上のコンテナ | 入れ子から抜けて、通ってきたコンテナの隣へ出る |
     ///
+    /// - Parameter node: 動かす対象。`focus parent` でコンテナを選んでいるときは
+    ///   **コンテナごと**動く（i3 と同じ）。
     /// - Returns: 木が変わったか。向きが一致する祖先が無ければ `false`。
     @discardableResult
-    public static func move(_ node: WindowNode, direction: Direction) -> Bool {
+    public static func move(_ node: Node, direction: Direction) -> Bool {
         var current: Node = node
         while let parent = current.parent {
             guard parent.orientation == direction.orientation,
@@ -109,7 +128,7 @@ public enum TreeOperations {
     /// - Returns: 比率が変わったか。下限に当たって動かせなければ `false`。
     @discardableResult
     public static func resize(
-        _ node: WindowNode,
+        _ node: Node,
         dimension: Dimension,
         delta: CGFloat,
         layout: LayoutEngine.Result,
@@ -184,28 +203,95 @@ public enum TreeOperations {
 
     // MARK: - layout
 
-    /// ウィンドウの親コンテナの向きを、候補の中で巡回させる。
+    /// 向きを候補の中で巡回させる。
+    ///
+    /// 対象がコンテナなら**そのコンテナ自身**の向きを、葉なら**親コンテナ**の向きを変える
+    ///（i3 の `layout toggle split` と同じ。`focus parent` で上がっていれば
+    /// そのコンテナが対象になる）。
     ///
     /// 現在の向きが候補に無ければ最初の候補にする。
     /// **利用者が明示的に選んだ向きは正規化で戻されない**（そうしないとキーが効かない）。
     ///
     /// - Returns: 向きが変わったか。
     @discardableResult
-    public static func cycleOrientation(of node: WindowNode, among candidates: [Orientation])
+    public static func cycleOrientation(of node: Node, among candidates: [Orientation])
         -> Bool
     {
-        guard let parent = node.parent, !candidates.isEmpty else { return false }
+        guard !candidates.isEmpty else { return false }
+        guard let target = (node as? ContainerNode) ?? node.parent else { return false }
 
         let next: Orientation
-        if let current = candidates.firstIndex(of: parent.orientation) {
+        if let current = candidates.firstIndex(of: target.orientation) {
             next = candidates[(current + 1) % candidates.count]
         } else {
             next = candidates[0]
         }
 
-        guard next != parent.orientation else { return false }
-        parent.orientation = next
-        parent.isOrientationExplicit = true
+        guard next != target.orientation else { return false }
+        target.orientation = next
+        target.isOrientationExplicit = true
+        return true
+    }
+
+    // MARK: - balance
+
+    /// 分割の比率を均等に戻す（AeroSpace の `balance-sizes`）。
+    ///
+    /// リサイズを重ねて収拾がつかなくなったときの戻し先。**入れ子の中まで**均等にする。
+    /// 一段だけ均すと、見た目には偏りが残ったままで「効かない」と読まれる。
+    ///
+    /// - Parameter node: 起点。葉を渡したときは親コンテナを均す
+    ///   （`focus parent` で上げていなくても効くようにする）。
+    /// - Returns: 比率が変わったか。既に均等なら `false`。
+    @discardableResult
+    public static func balance(_ node: Node) -> Bool {
+        guard let container = (node as? ContainerNode) ?? node.parent else { return false }
+        return balanceRecursively(container)
+    }
+
+    private static func balanceRecursively(_ container: ContainerNode) -> Bool {
+        var changed = false
+        let count = container.children.count
+        if count > 1 {
+            let even = Array(repeating: 1 / Double(count), count: count)
+            // 誤差の範囲で既に均等なら触らない。呼び出し側が「変わっていない」ことを
+            // 見て再配置を省けるようにする。
+            if zip(container.weights, even).contains(where: { abs($0 - $1) > 1e-9 }) {
+                container.setWeights(even)
+                changed = true
+            }
+        }
+        for child in container.children {
+            guard let nested = child as? ContainerNode else { continue }
+            if balanceRecursively(nested) { changed = true }
+        }
+        return changed
+    }
+
+    // MARK: - flatten
+
+    /// 入れ子を全部ほどいて、ウィンドウをルート直下に並べ直す。
+    ///
+    /// 分割を積み重ねすぎて収拾がつかなくなったときの逃げ道
+    ///（AeroSpace の `flatten-workspace-tree`）。**並び順は葉の深さ優先順を保つ**ので、
+    /// 画面上の見た目の順番がそのまま列になる。
+    ///
+    /// - Returns: 形が変わったか。既に平らなら `false`。
+    @discardableResult
+    public static func flatten(_ root: ContainerNode) -> Bool {
+        let leaves = root.windowNodes
+        guard leaves.count != root.children.count else { return false }
+
+        for leaf in leaves {
+            leaf.parent?.remove(leaf)
+        }
+        // 残った空のコンテナを外す。**後ろから外す**（前から消すと添字がずれる）。
+        for index in stride(from: root.children.count - 1, through: 0, by: -1) {
+            root.remove(at: index)
+        }
+        for leaf in leaves {
+            root.append(leaf)
+        }
         return true
     }
 }

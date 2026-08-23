@@ -66,6 +66,12 @@ public enum UnmanagedReason: String, Equatable, Sendable, CaseIterable, CustomSt
     ///
     /// **サブディスプレイは素の macOS のまま使えるようにする**ため、位置も大きさも触らない。
     case otherMonitor
+    /// 利用者がアプリごと隠した（Cmd+H）。
+    ///
+    /// **comet 自身が非表示ワークスペースのために隠したものとは区別する。**
+    /// 利用者が隠したものを勝手に表示へ戻すと Cmd+H が効かないアプリになるし、
+    /// 隠れたまま枠だけ確保すると配置に穴が開く。最小化と同じく列から外す。
+    case userHidden
 
     /// 状態の変化で解消しうるか。
     ///
@@ -74,7 +80,7 @@ public enum UnmanagedReason: String, Equatable, Sendable, CaseIterable, CustomSt
     public var isTransient: Bool {
         switch self {
         // サブディスプレイ上は一時的な理由。メインへ戻したら再評価してタイルへ戻す。
-        case .fullScreen, .minimized, .tooSmall, .otherMonitor: true
+        case .fullScreen, .minimized, .tooSmall, .otherMonitor, .userHidden: true
         // 階層は窓の素性であって状態ではない。ピクチャーインピクチャが
         // 普通のウィンドウに変わることはない。
         case .unknownRole, .notAWindow, .nonStandardSubrole, .alwaysOnTop: false
@@ -91,6 +97,7 @@ public enum UnmanagedReason: String, Equatable, Sendable, CaseIterable, CustomSt
         case .minimized: "最小化されている"
         case .tooSmall: "小さすぎる"
         case .otherMonitor: "メインディスプレイの外（サブディスプレイは制御しない）"
+        case .userHidden: "利用者がアプリごと隠している（Cmd+H）"
         }
     }
 }

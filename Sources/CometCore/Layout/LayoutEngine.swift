@@ -47,6 +47,27 @@ public struct SplitBoundary {
 /// 幅を丸めると終端が格子から外れ、隣との間に半端な隙間が残る。
 public enum LayoutEngine {
 
+    /// 最小寸法の合計が領域に収まらなかった分割。**重なりが避けられない状態。**
+    ///
+    /// macOS のアプリは指定より小さくならない（Safari は幅 574、Parsec は 640 が下限。
+    /// いずれも実測）。合計が領域を超えると、どう配っても隣にはみ出す。
+    ///
+    /// **黙って重ねてはいけない。** 利用者から見れば「タイリングが壊れている」ので、
+    /// 何が起きているのかと打つ手（1枚を浮かせる・別のワークスペースへ移す）を
+    /// 伝えられるように、ここで事実として持ち出す。
+    public struct Overflow: Equatable, Sendable {
+        /// 収まらなかった分割に属するウィンドウ。
+        public let windowIDs: [CGWindowID]
+        /// 分割の向き。`horizontal` なら幅が足りない。
+        public let axis: Orientation
+        /// 配れる長さ。
+        public let available: CGFloat
+        /// 最小寸法の合計。
+        public let required: CGFloat
+
+        public var shortfall: CGFloat { required - available }
+    }
+
     public struct Result {
         /// ウィンドウ ID → 目標矩形（AX 座標系）。
         public let frames: [CGWindowID: CGRect]
@@ -54,6 +75,8 @@ public enum LayoutEngine {
         public let order: [CGWindowID]
         /// 分割境界。要素数は各コンテナの `children.count - 1` の総和。
         public let boundaries: [SplitBoundary]
+        /// 最小寸法が収まらなかった分割。空なら重なりは起きない。
+        public var overflows: [Overflow] = []
 
         /// `SplitBoundary` がコンテナを指すため `Result` は `Sendable` ではない。
         /// 共有された定数にはできないので、都度作る。
@@ -88,7 +111,9 @@ public enum LayoutEngine {
         if let fullscreen, frames[fullscreen] != nil {
             frames[fullscreen] = usable
         }
-        return Result(frames: frames, order: worker.order, boundaries: worker.boundaries)
+        return Result(
+            frames: frames, order: worker.order, boundaries: worker.boundaries,
+            overflows: worker.overflows)
     }
 
     /// 再帰の途中の状態を持つ。`LayoutEngine` 自体は状態を持たない。
@@ -101,6 +126,7 @@ public enum LayoutEngine {
         var frames: [CGWindowID: CGRect] = [:]
         var order: [CGWindowID] = []
         var boundaries: [SplitBoundary] = []
+        var overflows: [LayoutEngine.Overflow] = []
 
         mutating func place(_ node: Node, in rect: CGRect) {
             if let window = node as? WindowNode {
@@ -124,10 +150,18 @@ public enum LayoutEngine {
                 ? container.weights
                 : Array(repeating: 1 / Double(count), count: count)
 
+            let minimums = container.children.map { minimumExtent($0, along: axis) }
+            // **収まらないことは事実として持ち出す。** ここで黙ると、画面上は
+            // ただ重なって見えるだけで原因が分からない。
+            let totalMinimum = minimums.reduce(0, +)
+            if totalMinimum > available {
+                overflows.append(
+                    LayoutEngine.Overflow(
+                        windowIDs: container.windowIDs, axis: axis,
+                        available: available, required: totalMinimum))
+            }
             let lengths = Self.distribute(
-                available: available,
-                weights: weights,
-                minimums: container.children.map { minimumExtent($0, along: axis) })
+                available: available, weights: weights, minimums: minimums)
 
             var offset = start
             for (index, child) in container.children.enumerated() {

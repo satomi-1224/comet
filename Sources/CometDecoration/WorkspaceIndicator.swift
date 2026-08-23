@@ -20,11 +20,21 @@ public final class WorkspaceIndicator {
     /// HUD を出しておく時間。
     public var hudDuration: TimeInterval
 
+    /// ワークスペース番号 → 名前。書かれていない番号は番号だけを出す。
+    public var names: [WorkspaceID: String] = [:] {
+        didSet {
+            guard names != oldValue else { return }
+            refresh()
+        }
+    }
+
     private var statusItem: NSStatusItem?
     private var hud: NSWindow?
     private var hudDismissal: DispatchWorkItem?
-    private var current: WorkspaceID = 1
-    private var total: Int = 10
+    private var status = WorkspaceStatus(
+        visible: [MonitorAssignment(monitor: 0, workspace: 1)], focused: 1, occupied: [], total: 10)
+    private var current: WorkspaceID { status.focused }
+    private var total: Int { status.total }
     private let log: Log
     /// メニューバーが常に隠れる設定か。**起動時に一度だけ読む。**
     ///
@@ -44,17 +54,76 @@ public final class WorkspaceIndicator {
         self.log = log
     }
 
-    /// 表示中のワークスペースが変わったことを伝える。
-    public func update(to workspace: WorkspaceID, of total: Int) {
-        let changed = workspace != current
-        current = workspace
-        self.total = total
+    /// ワークスペースの見え方が変わったことを伝える。
+    public func update(_ status: WorkspaceStatus) {
+        // HUD は「切り替わった」ことを知らせるもの。中身の増減で出しては煩い。
+        let switched = status.focused != self.status.focused
+            || status.visible != self.status.visible
+        self.status = status
 
         updateMenubar()
-        // HUD は「切り替わった」ことを知らせるものなので、変化がなければ出さない。
-        if changed, style.showsHUD {
+        if switched, style.showsHUD {
             presentHUD()
         }
+    }
+
+    /// 今フォーカスしているモニタ。**HUD をどの画面に出すかを決める。**
+    ///
+    /// `NSScreen.main` はキーウィンドウのある画面なので、切り替えた側とは
+    /// 別の画面を指すことがある（2画面で実際にそうなった）。
+    private var focusedMonitor: MonitorID? { status.focusedMonitor }
+
+    /// メニューバーに並べる1つ分。
+    struct Segment: Equatable, Sendable {
+        enum Emphasis: Equatable, Sendable {
+            /// 今キー入力が効くワークスペース。
+            case focused
+            /// 別のモニタに映っている。
+            case visible
+            /// 映っていないがウィンドウが居る。
+            case occupied
+        }
+        let workspace: WorkspaceID
+        let text: String
+        let emphasis: Emphasis
+    }
+
+    /// メニューバーに並べるもの。**i3 のバーと同じ考え方。**
+    ///
+    /// 出すのは「映っている」か「ウィンドウが居る」番号だけ。空の番号まで並べると、
+    /// 押す手掛かりにならないうえ 10 個並んでメニューバーを埋める。
+    ///
+    /// 名前は**今いるワークスペースにだけ**添える。全部に添えると横に長くなり、
+    /// 切り替えるたびに他の項目の位置が動いて読みにくい。
+    nonisolated static func segments(
+        _ status: WorkspaceStatus, names: [WorkspaceID: String] = [:]
+    ) -> [Segment]
+    {
+        let visible = Set(status.visible.map(\.workspace))
+        let listed = visible.union(status.occupied).sorted()
+        return listed.map { id in
+            let emphasis: Segment.Emphasis =
+                id == status.focused ? .focused : (visible.contains(id) ? .visible : .occupied)
+            var text = "\(id)"
+            if id == status.focused, let name = names[id], !name.isEmpty {
+                text += ":\(name)"
+            }
+            return Segment(workspace: id, text: text, emphasis: emphasis)
+        }
+    }
+
+    /// ログと検証に使う平文。**画面に出るのは属性付きの文字列**（強調で区別する）。
+    ///
+    /// 平文では強調を表せないので、フォーカス中を `[]`、別モニタに映っているものを
+    /// `()` で囲んで区別できるようにする。
+    nonisolated static func plainTitle(_ segments: [Segment]) -> String {
+        segments.map { segment in
+            switch segment.emphasis {
+            case .focused: "[\(segment.text)]"
+            case .visible: "(\(segment.text))"
+            case .occupied: segment.text
+            }
+        }.joined(separator: " ")
     }
 
     public func stop() {
@@ -98,32 +167,79 @@ public final class WorkspaceIndicator {
 
         let item = statusItem ?? NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem = item
-        item.button?.title = "\(current)"
+        let segments = Self.segments(status, names: names)
+        item.button?.attributedTitle = Self.attributedTitle(segments)
         // 表示専用。押しても何も起きないのでクリックを受け付けない。
         item.button?.isEnabled = false
-        item.button?.toolTip = "comet: ワークスペース \(current)/\(total)"
+        item.button?.toolTip =
+            "comet: ワークスペース \(current)/\(total)"
+            + (names[current].map { "（\($0)）" } ?? "")
+            + "\n太字=操作中 / 通常=別の画面に表示中 / 薄字=ウィンドウあり"
 
         // **置かれる場所を決めるのは OS 側**で、ウィンドウ一覧にも出てこない。
-        // 撮った画面のどこを見れば良いか分かるように、横位置と幅を残しておく。
+        // どこを見れば良いかの手掛かりとして横位置と幅を残しておく。
         //
-        // 縦位置は残さない。status item のウィンドウは AppKit 座標でメニューバーの
-        // 高さぶん上にあり（実測で画面の外を指す y になる）、作った直後は高さも 0 で
-        // 返ってくる。上下の範囲は「メニューバーの高さ」として画面情報から決めるほうが確か。
+        // - Important: **この座標を当てにして画面を撮ってはいけない。**
+        //   2画面では実際に描かれている場所と食い違う値が返る
+        //   （実測: 2台目のメニューバーに出ているのに x=3840 幅=29。その x は画面の外）。
+        //   縦位置はさらに当てにならない（作った直後は高さ 0、y は画面の外を指す）。
+        //   画素で確かめるときは位置を当てず、メニューバーの帯全体の差を見る
+        //   （`scripts/verify.sh` の `capture_menubars`）。
         guard let frame = item.button?.window?.frame, frame.width > 0 else {
-            log.debug("メニューバー: ワークスペース \(current)（位置は未確定）")
+            log.debug("メニューバー: \(Self.plainTitle(segments))（位置は未確定）")
             return
         }
         log.debug(
-            "メニューバー: ワークスペース \(current) x=\(Int(frame.minX)) 幅=\(Int(frame.width))")
+            "メニューバー: \(Self.plainTitle(segments)) "
+                + "x=\(Int(frame.minX)) 幅=\(Int(frame.width))")
+    }
+
+    /// 強調で区別した表示。
+    ///
+    /// **記号で区別しない。** `[1] (2) 5` のように括弧を並べるとメニューバーが
+    /// 賑やかになり、番号そのものが読みにくい。太さと濃さで差を付ける。
+    private static func attributedTitle(_ segments: [Segment]) -> NSAttributedString {
+        let size = NSFont.systemFontSize
+        let result = NSMutableAttributedString()
+        for (index, segment) in segments.enumerated() {
+            if index > 0 {
+                result.append(NSAttributedString(string: " "))
+            }
+            let attributes: [NSAttributedString.Key: Any]
+            switch segment.emphasis {
+            case .focused:
+                attributes = [
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: size, weight: .bold),
+                    .foregroundColor: NSColor.labelColor,
+                ]
+            case .visible:
+                attributes = [
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: size, weight: .regular),
+                    .foregroundColor: NSColor.labelColor,
+                ]
+            case .occupied:
+                attributes = [
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: size, weight: .regular),
+                    .foregroundColor: NSColor.tertiaryLabelColor,
+                ]
+            }
+            result.append(NSAttributedString(string: segment.text, attributes: attributes))
+        }
+        return result
     }
 
     // MARK: - HUD
 
     private func presentHUD() {
         let window = ensureHUD()
-        if let label = window.contentView?.subviews.first as? NSTextField {
-            label.stringValue = "\(current)"
-        }
+        numberLabel?.stringValue = "\(current)"
+        // 名前が付いていれば番号の下に添える。番号だけでは「どこへ行ったか」は
+        // 分かっても「そこが何の場所か」が分からない。
+        let name = names[current] ?? ""
+        nameLabel?.stringValue = name
+        nameLabel?.isHidden = name.isEmpty
+        // 名前があるぶん数字を上へ寄せる。中央に置いたままだと名前と重なる。
+        layoutHUDLabels(hasName: !name.isEmpty)
 
         // 連続切替では前の HUD を即座に差し替える。フェード中の重なりを避ける。
         hudDismissal?.cancel()
@@ -163,7 +279,7 @@ public final class WorkspaceIndicator {
     }
 
     private func centerHUD(_ window: NSWindow) {
-        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+        guard let screen = hudScreen() else { return }
         let size = window.frame.size
         let visible = screen.visibleFrame
         window.setFrameOrigin(
@@ -172,10 +288,28 @@ public final class WorkspaceIndicator {
                 y: visible.midY - size.height / 2))
     }
 
+    /// HUD を出す画面。切り替わったモニタを優先する。
+    private func hudScreen() -> NSScreen? {
+        if let focusedMonitor {
+            let match = NSScreen.screens.first { screen in
+                guard
+                    let number = screen.deviceDescription[
+                        NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+                else { return false }
+                return MonitorID(number.uint32Value) == focusedMonitor
+            }
+            if let match { return match }
+        }
+        return NSScreen.main ?? NSScreen.screens.first
+    }
+
+    /// HUD の一辺。数字と名前が収まる大きさ。
+    private static let hudSide: CGFloat = 120
+
     private func ensureHUD() -> NSWindow {
         if let hud { return hud }
 
-        let side: CGFloat = 120
+        let side = Self.hudSide
         let window = NSWindow(
             contentRect: CGRect(x: 0, y: 0, width: side, height: side),
             styleMask: .borderless, backing: .buffered, defer: false)
@@ -196,15 +330,42 @@ public final class WorkspaceIndicator {
         backdrop.layer?.cornerRadius = 20
         backdrop.layer?.masksToBounds = true
 
-        let label = NSTextField(labelWithString: "\(current)")
-        label.font = .monospacedDigitSystemFont(ofSize: 56, weight: .semibold)
-        label.alignment = .center
-        label.textColor = .labelColor
-        label.frame = CGRect(x: 0, y: (side - 70) / 2, width: side, height: 70)
-        backdrop.addSubview(label)
+        let number = NSTextField(labelWithString: "\(current)")
+        number.font = .monospacedDigitSystemFont(ofSize: 56, weight: .semibold)
+        number.alignment = .center
+        number.textColor = .labelColor
+        backdrop.addSubview(number)
+        numberLabel = number
+
+        let name = NSTextField(labelWithString: "")
+        name.font = .systemFont(ofSize: 15, weight: .medium)
+        name.alignment = .center
+        name.textColor = .secondaryLabelColor
+        name.lineBreakMode = .byTruncatingTail
+        name.isHidden = true
+        backdrop.addSubview(name)
+        nameLabel = name
 
         window.contentView = backdrop
         hud = window
+        layoutHUDLabels(hasName: false)
         return window
     }
+
+    /// HUD の中身を並べる。名前があるかどうかで縦位置が変わる。
+    private func layoutHUDLabels(hasName: Bool) {
+        let side = Self.hudSide
+        let numberHeight: CGFloat = 70
+        if hasName {
+            numberLabel?.frame = CGRect(
+                x: 0, y: (side - numberHeight) / 2 + 12, width: side, height: numberHeight)
+            nameLabel?.frame = CGRect(x: 8, y: 22, width: side - 16, height: 20)
+        } else {
+            numberLabel?.frame = CGRect(
+                x: 0, y: (side - numberHeight) / 2, width: side, height: numberHeight)
+        }
+    }
+
+    private var numberLabel: NSTextField?
+    private var nameLabel: NSTextField?
 }

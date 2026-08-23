@@ -1,4 +1,5 @@
 import CoreGraphics
+import Darwin
 import Testing
 
 @testable import CometDecoration
@@ -67,16 +68,18 @@ struct WindowVisibilityTests {
         ]
     }
 
-    @Test("Dock が画面全体を覆っていれば Mission Control とみなす")
+    /// 2560x1664 ×1台での実測。Mission Control でレベル 18 と 20 の覆いが2枚出る。
+    @Test("覆いが画面の数より多ければ Mission Control とみなす")
     func detectsSystemOverlay() {
         let display = CGSize(width: 2560, height: 1664)
         let list = [
             window(id: 1, owner: "Dock", size: display),
+            window(id: 3, owner: "Dock", size: display),
             window(id: 2, owner: "WezTerm", size: CGSize(width: 1275, height: 799)),
         ]
         let parsed = WindowVisibility.parse(list, displaySizes: [display])
         #expect(parsed.systemOverlayIsVisible)
-        #expect(parsed.onScreen == [1, 2])
+        #expect(parsed.onScreen == [1, 2, 3])
     }
 
     /// **Dock 本体（帯）と取り違えてはいけない。** 取り違えると枠線が常に消える。
@@ -88,5 +91,56 @@ struct WindowVisibilityTests {
             window(id: 2, owner: "WezTerm", size: CGSize(width: 1275, height: 799)),
         ]
         #expect(!WindowVisibility.parse(list, displaySizes: [display]).systemOverlayIsVisible)
+    }
+
+    /// **これを覆いとみなしたせいで、枠線が一度も出ない環境があった。**
+    ///
+    /// 1920x1080 ×2台の実機では、Dock が**常設で**画面いっぱいのウィンドウを
+    /// 1枚持っている（レベル 20、名前 "Dock"）。「画面を覆う Dock の窓があれば
+    /// Mission Control」と判定していたため、その環境では枠線が常に引っ込んでいた。
+    @Test("常設の全画面 Dock ウィンドウは覆いとみなさない")
+    func aPermanentFullScreenDockWindowIsNotAnOverlay() {
+        let display = CGSize(width: 1920, height: 1080)
+        let list = [
+            window(id: 13, owner: "Dock", size: display),
+            window(id: 33, owner: "Parsec", size: CGSize(width: 956, height: 964)),
+        ]
+        #expect(
+            !WindowVisibility.parse(list, displaySizes: [display, display])
+                .systemOverlayIsVisible)
+    }
+
+    /// 上と同じ環境で Mission Control を開いたときの実測（覆いが4枚増えて計5枚）。
+    @Test("2台構成でも Mission Control を見分ける")
+    func detectsOverlayWithTwoDisplays() {
+        let display = CGSize(width: 1920, height: 1080)
+        var list = [window(id: 33, owner: "Parsec", size: CGSize(width: 956, height: 964))]
+        for id in [13, 548, 549, 550, 552] {
+            list.append(window(id: CGWindowID(id), owner: "Dock", size: display))
+        }
+        #expect(
+            WindowVisibility.parse(list, displaySizes: [display, display])
+                .systemOverlayIsVisible)
+    }
+
+    /// **Dock は PID で選ぶ。** 名前（`kCGWindowName` / `kCGWindowOwnerName`）に
+    /// 頼れないため（`kCGWindowName` は画面収録の権限が要る）、実運用では
+    /// `kCGWindowOwnerPID` で選ぶ。
+    @Test("PID を渡したらそちらで Dock を選ぶ")
+    func prefersPIDOverName() {
+        let display = CGSize(width: 1920, height: 1080)
+        var list: [[String: Any]] = []
+        for id in [1, 2, 3] {
+            var info = window(id: CGWindowID(id), owner: "なまえは当てにならない", size: display)
+            info[kCGWindowOwnerPID as String] = pid_t(387)
+            list.append(info)
+        }
+        #expect(
+            WindowVisibility.parse(list, displaySizes: [display, display], dockPID: 387)
+                .systemOverlayIsVisible)
+        // 別のプロセスの窓は数に入れない。
+        #expect(
+            !WindowVisibility.parse(list, displaySizes: [display, display], dockPID: 999)
+                .systemOverlayIsVisible)
     }
 }

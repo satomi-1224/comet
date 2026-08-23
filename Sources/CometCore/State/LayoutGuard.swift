@@ -68,4 +68,33 @@ struct LayoutGuard {
     static func isOff(_ actual: CGRect, from desired: CGRect, tolerance: CGFloat = 2) -> Bool {
         !Geometry.isApproximatelyEqual(actual, desired, tolerance: tolerance)
     }
+
+    /// もう寄せ切れないと分かっている姿に落ち着いているか。
+    ///
+    /// **押し合いを終わらせるための判定。** 文字セル単位でしかリサイズできない
+    /// アプリは目標にぴったり収まらない。補正で諦めたあとも見張りが「ずれている」と
+    /// 見なして戻しに行くと、諦める → 少し待つ → また戻す、が永久に続く
+    ///（実機で 47 秒に 13 回、約 52 回の無駄な AX 往復を観測）。
+    ///
+    /// 同じ目標に対して前回と同じ実測へ落ち着いたなら、それがそのウィンドウの限界。
+    ///
+    /// - Parameters:
+    ///   - tolerated: 諦めた時点の（目標, 実測）。無ければ `false`。
+    ///   - targetTolerance: 目標が「同じ」とみなせる差。レイアウトが計算し直しても
+    ///     同じ値になるので狭くてよい。
+    ///   - actualTolerance: 実測が「同じ」とみなせる差。アプリ側の丸めがあるので
+    ///     ``isOff(_:from:tolerance:)`` と揃える。
+    static func isSettledAtLimit(
+        actual: CGRect,
+        desired: CGRect,
+        tolerated: (target: CGRect, actual: CGRect)?,
+        targetTolerance: CGFloat = 0.5,
+        actualTolerance: CGFloat = 2
+    ) -> Bool {
+        guard let tolerated else { return false }
+        return Geometry.isApproximatelyEqual(
+            tolerated.target, desired, tolerance: targetTolerance)
+            && Geometry.isApproximatelyEqual(
+                tolerated.actual, actual, tolerance: actualTolerance)
+    }
 }

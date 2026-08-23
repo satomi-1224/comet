@@ -118,6 +118,19 @@ public enum ConfigLoader {
             }
             configuration.focusFollowsActivation =
                 workspaces.focusFollowsActivation ?? configuration.focusFollowsActivation
+            configuration.workspaceAutoBackAndForth =
+                workspaces.autoBackAndForth ?? configuration.workspaceAutoBackAndForth
+
+            for (key, name) in workspaces.names ?? [:] {
+                guard let id = Int(key), id >= 1 else {
+                    problems.append(
+                        Problem(
+                            kind: .invalidValue,
+                            detail: "[workspaces.names] のキーはワークスペース番号（1 以上）: \(key)"))
+                    continue
+                }
+                configuration.workspaceNames[id] = name
+            }
 
             if let value = workspaces.hidden {
                 if let parsed = HiddenWindowStrategy(rawValue: value) {
@@ -129,6 +142,18 @@ public enum ConfigLoader {
                             detail: "[workspaces] hidden の値が不明: \(value)"
                                 + "（候補: \(names(of: HiddenWindowStrategy.allCases))）"))
                 }
+            }
+        }
+
+        if let value = raw.monitors?.manage {
+            if let parsed = MonitorScope(rawValue: value) {
+                configuration.monitorScope = parsed
+            } else {
+                problems.append(
+                    Problem(
+                        kind: .invalidValue,
+                        detail: "[monitors] manage の値が不明: \(value)"
+                            + "（候補: \(names(of: MonitorScope.allCases))）"))
             }
         }
 
@@ -190,15 +215,9 @@ public enum ConfigLoader {
                 } ?? configuration.border.radius,
                 focusedColor: color(
                     border.colorFocused, "[border] color-focused", &problems)
-                    ?? configuration.border.focusedColor)
-
-            // 「タイル全部に枠を描く」は未対応。書いてあるのに効かないと分からないので伝える。
-            if border.colorUnfocused != nil {
-                problems.append(
-                    Problem(
-                        kind: .unsupportedOption,
-                        detail: "[border] color-unfocused はまだ未対応（フォーカス中だけに枠を描く）"))
-            }
+                    ?? configuration.border.focusedColor,
+                unfocusedColor: color(
+                    border.colorUnfocused, "[border] color-unfocused", &problems))
         }
 
         if let indicator = raw.indicator {
@@ -225,6 +244,8 @@ public enum ConfigLoader {
                 configuration.focusCycleReset = clamped(
                     value / 1000, to: 0...10, label: "[focus] cycle-reset-ms", &problems)
             }
+            configuration.focusFollowsMouse = focus.followsMouse ?? configuration.focusFollowsMouse
+            configuration.focusWrapping = focus.wrapping ?? configuration.focusWrapping
             if let value = focus.cycleScope {
                 if let scope = FocusCycleScope(rawValue: value) {
                     configuration.focusCycleScope = scope
@@ -255,7 +276,9 @@ public enum ConfigLoader {
             }
         }
 
-        let bindings = parseBindings(raw.mode, problems: &problems)
+        let modes = parseModes(raw.mode, problems: &problems)
+        configuration.modes = modes
+        let bindings = configuration.bindings
         if bindings.isEmpty {
             // 設定ファイルは既定を**置き換える**。`[gaps]` だけ書いた設定で
             // 全てのキーが効かなくなるのは分かりにくいので必ず知らせる。
@@ -266,26 +289,50 @@ public enum ConfigLoader {
                         + "キーバインドは1つも登録されない"
                         + "（--print-default-config で全部入りの雛形を出せる）"))
         }
-        configuration.bindings = bindings
+        // 書かれていないモードへ飛ぼうとするバインドは、押しても何も起きない。
+        // **キーが効かない原因が綴り間違いだと分かるようにする。**
+        for (mode, bindings) in modes.sorted(by: { $0.key < $1.key }) {
+            for binding in bindings {
+                for command in binding.commands {
+                    guard case .mode(let target) = command, modes[target] == nil else { continue }
+                    problems.append(
+                        Problem(
+                            kind: .invalidCommand,
+                            detail: "[mode.\(mode).binding] \(binding.spec) の行き先 "
+                                + "[mode.\(target)] が書かれていない"))
+                }
+            }
+        }
         configuration.windowRules = parseWindowRules(raw.windowRule, problems: &problems)
+        // **知らない項目名を最後に照合する。** `Decodable` は黙って捨てるので、
+        // ここで拾わないと「設定したのに効かない」だけが残る。
+        problems.append(contentsOf: ConfigSchema.unknownKeys(in: toml))
         configuration.problems = problems
         return configuration
     }
 
     // MARK: - バインド
 
-    private static func parseBindings(
+    /// すべてのモードのバインドを読む。
+    ///
+    /// **モードは i3 の `mode "resize"` に相当する層。** `main` が既定で、
+    /// `mode <名前>` コマンドで移る。
+    private static func parseModes(
         _ modes: [String: RawMode]?, problems: inout [Problem]
-    ) -> [Binding] {
-        guard let modes else { return [] }
-
-        // main 以外のモード（リサイズモード等）は未対応。黙って落とさない。
-        for name in modes.keys.sorted() where name != "main" {
-            problems.append(
-                Problem(kind: .unsupportedMode, detail: "[mode.\(name)] はまだ未対応なので読み飛ばした"))
+    ) -> [String: [Binding]] {
+        guard let modes else { return [:] }
+        var result: [String: [Binding]] = [:]
+        // 辞書の並びは実行ごとに変わる。ログと重複検出が揺れないよう名前順に固定する。
+        for name in modes.keys.sorted() {
+            guard let binding = modes[name]?.binding else { continue }
+            result[name] = parseBindings(binding, mode: name, problems: &problems)
         }
-        guard let binding = modes["main"]?.binding else { return [] }
+        return result
+    }
 
+    private static func parseBindings(
+        _ binding: [String: CommandSpec], mode: String, problems: inout [Problem]
+    ) -> [Binding] {
         var result: [Binding] = []
         // 辞書の並びは実行ごとに変わる。ログと重複検出が揺れないようキー順に固定する。
         for spec in binding.keys.sorted() {
@@ -296,7 +343,9 @@ public enum ConfigLoader {
                 hotkey = try KeySpec.parse(spec)
             } catch {
                 problems.append(
-                    Problem(kind: .invalidBinding, detail: "\(spec) を解釈できない: \(error)"))
+                    Problem(
+                        kind: .invalidBinding,
+                        detail: "[mode.\(mode).binding] \(spec) を解釈できない: \(error)"))
                 continue
             }
 
@@ -337,24 +386,56 @@ public enum ConfigLoader {
             let label = "[[window-rule]] の \(index + 1) 番目"
 
             // 条件が空だと全ウィンドウに当たる。事故が大きいので拒否する。
-            guard rule.ifAppID != nil || rule.ifWindowTitleSubstring != nil else {
+            guard rule.ifAppID != nil || rule.ifWindowTitleSubstring != nil
+                || rule.ifWindowTitleRegex != nil
+            else {
                 problems.append(
                     Problem(kind: .invalidRule, detail: "\(label): 条件が無い（全ウィンドウに当たってしまう）"))
                 continue
             }
-            guard rule.run == "layout floating" else {
+            // 正規表現は**読み込みのときに確かめる。** 実行時に黙って空振りすると、
+            // 「ルールが当たらない」原因が綴りなのか条件なのか分からない。
+            if let pattern = rule.ifWindowTitleRegex, !WindowRule.isValidRegex(pattern) {
                 problems.append(
                     Problem(
                         kind: .invalidRule,
-                        detail: "\(label): run に指定できるのは \"layout floating\" のみ（\(rule.run)）"))
+                        detail: "\(label): if-window-title-regex を正規表現として解釈できない: \(pattern)"))
+                continue
+            }
+            guard let action = ruleAction(rule.run) else {
+                problems.append(
+                    Problem(
+                        kind: .invalidRule,
+                        detail: "\(label): run に指定できるのは \"layout floating\" と "
+                            + "\"move-node-to-workspace <番号>\"（\(rule.run)）"))
                 continue
             }
             result.append(
                 WindowRule(
                     appID: rule.ifAppID, titleSubstring: rule.ifWindowTitleSubstring,
-                    action: .float))
+                    titleRegex: rule.ifWindowTitleRegex, action: action))
         }
         return result
+    }
+
+    /// `run` に書ける動作。**コマンドの綴りをそのまま使う。**
+    ///
+    /// 別の綴りを作ると「キーバインドでは動くのにルールでは書けない」ことになり、
+    /// どちらの語彙を覚えればよいのか分からなくなる。
+    private static func ruleAction(_ run: String) -> WindowRule.Action? {
+        let tokens = run.split(whereSeparator: \.isWhitespace).map(String.init)
+        switch tokens.first {
+        case "layout":
+            // i3 の `floating enable` も受ける。
+            return tokens.dropFirst().first == "floating" ? .float : nil
+        case "floating":
+            return tokens.dropFirst().first == "enable" ? .float : nil
+        case "move-node-to-workspace":
+            guard tokens.count == 2, let id = Int(tokens[1]), id >= 1 else { return nil }
+            return .moveToWorkspace(id)
+        default:
+            return nil
+        }
     }
 
     private static func names<T: RawRepresentable>(of cases: [T]) -> String
@@ -428,6 +509,7 @@ private struct RawConfiguration: Decodable {
     var normalization: RawNormalization?
     var layout: RawLayout?
     var workspaces: RawWorkspaces?
+    var monitors: RawMonitors?
     var gaps: RawGaps?
     var performance: RawPerformance?
     var debug: RawDebug?
@@ -440,7 +522,7 @@ private struct RawConfiguration: Decodable {
 
     enum CodingKeys: String, CodingKey {
         case startAtLogin = "start-at-login"
-        case normalization, layout, workspaces, gaps, performance, debug
+        case normalization, layout, workspaces, monitors, gaps, performance, debug
         case border, indicator, wallpaper, focus, mode
         case windowRule = "window-rule"
     }
@@ -473,10 +555,14 @@ private struct RawIndicator: Decodable {
 private struct RawFocus: Decodable {
     var cycleResetMS: Double?
     var cycleScope: String?
+    var followsMouse: Bool?
+    var wrapping: Bool?
 
     enum CodingKeys: String, CodingKey {
         case cycleResetMS = "cycle-reset-ms"
         case cycleScope = "cycle-scope"
+        case followsMouse = "follows-mouse"
+        case wrapping
     }
 }
 
@@ -488,14 +574,22 @@ private struct RawWallpaper: Decodable {
     var map: [String: String]?
 }
 
+private struct RawMonitors: Decodable {
+    var manage: String?
+}
+
 private struct RawWorkspaces: Decodable {
     var count: Int?
     var hidden: String?
     var focusFollowsActivation: Bool?
+    var autoBackAndForth: Bool?
+    /// TOML のキーは文字列なので、番号への変換は読み込み側で行う。
+    var names: [String: String]?
 
     enum CodingKeys: String, CodingKey {
-        case count, hidden
+        case count, hidden, names
         case focusFollowsActivation = "focus-follows-activation"
+        case autoBackAndForth = "auto-back-and-forth"
     }
 }
 
@@ -572,11 +666,13 @@ private struct RawMode: Decodable {
 private struct RawWindowRule: Decodable {
     var ifAppID: String?
     var ifWindowTitleSubstring: String?
+    var ifWindowTitleRegex: String?
     var run: String
 
     enum CodingKeys: String, CodingKey {
         case ifAppID = "if-app-id"
         case ifWindowTitleSubstring = "if-window-title-substring"
+        case ifWindowTitleRegex = "if-window-title-regex"
         case run
     }
 }

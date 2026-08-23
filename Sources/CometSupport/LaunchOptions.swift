@@ -60,7 +60,13 @@ public struct LaunchOptions: Equatable, Sendable {
     public var emitKey: String?
     /// 検証用: 合成ドラッグを送って終了する。`x,y:dx,dy` の形。
     public var emitDrag: String?
+    /// 検証用: ポインタを動かして終了する。`x,y` の形。
+    public var emitMove: String?
 
+    /// 常駐している comet へ送るコマンド（i3 の `i3-msg`）。送ったら終了する。
+    public var send: String?
+    /// 常駐している comet に問い合わせる話題。答えを出したら終了する。
+    public var query: String?
     /// 起動後に実行するコマンド。複数回指定でき、書いた順に実行される。
     ///
     /// ホットキーを押せない環境（合成キーの送出に別の権限が要る）でも
@@ -94,12 +100,26 @@ public struct LaunchOptions: Equatable, Sendable {
                                 例: --run "workspace 2" --run "move left"
                                 ホットキーを押せない環境での検証用。
 
+        常駐している comet を外から動かす（i3 の i3-msg 相当。送ったら終了する）:
+          --send <command>      コマンドを送る。設定に書ける綴りがそのまま使える。
+                                例: comet --send "workspace 3"
+                                    comet --send "move-node-to-monitor next"
+          --query <topic>       状態を問い合わせる。状態バーから読める形で返る。
+                                workspaces  ワークスペースの一覧（1行1件）
+                                windows     ウィンドウの一覧（1行1件）
+                                monitors    ディスプレイの一覧（1行1件）
+                                tree        分割の形
+                                state       まとめ（1行）
+                                例: comet --query workspaces
+
         検証用（送って終了する。常駐しない）:
           --emit-key <spec[:n]> 合成キーを送る。n を 2 以上にするとキー連射を再現する。
                                 例: --emit-key alt-ctrl-l:20
           --emit-drag <x,y:dx,dy>
                                 合成ドラッグを送る。座標は左上原点。
                                 例: --emit-drag 1278,860:-200,0
+          --emit-move <x,y>     ポインタを動かす（ボタンは押さない）。
+                                focus-follows-mouse の確認に使う。
           --print-keys          指定できるキー名を一覧表示して終了する
           --help, -h            このヘルプを表示して終了する
 
@@ -150,6 +170,12 @@ public struct LaunchOptions: Equatable, Sendable {
                     options.emitKey = value
                 case "--emit-drag":
                     options.emitDrag = value
+                case "--emit-move":
+                    options.emitMove = value
+                case "--send":
+                    options.send = value
+                case "--query":
+                    options.query = value
                 default:
                     throw LaunchOptionsError.unknownFlag(flag)
                 }
@@ -199,6 +225,15 @@ public struct LaunchOptions: Equatable, Sendable {
 
             case "--emit-drag":
                 options.emitDrag = try takeValue(args, after: &index, flag: arg)
+
+            case "--emit-move":
+                options.emitMove = try takeValue(args, after: &index, flag: arg)
+
+            case "--send":
+                options.send = try takeValue(args, after: &index, flag: arg)
+
+            case "--query":
+                options.query = try takeValue(args, after: &index, flag: arg)
 
             case "--preview-layout":
                 let value = try takeValue(args, after: &index, flag: arg)
