@@ -1701,9 +1701,20 @@ else
     if [ -z "$TARGET" ] || [ -z "$LINE" ]; then
       ng "タイルへ戻したあとの目標矩形が無い"
     else
-      expect_rect_near \
-        "$(field "$LINE" x),$(field "$LINE" y),$(field "$LINE" w),$(field "$LINE" h)" \
-        "$TARGET" 4 "タイルへ戻すと配置に従った"
+      # **アプリが最小寸法で従わないことがある。** comet が正しい矩形を要求しても
+      # アプリが縮まなければ一致しない（実測: Parsec は高さ 480 未満にならない）。
+      # それは環境の制約であって実装の問題ではないので、
+      # **comet が目標そのものを要求していたと確かめられたときだけ**省略にする。
+      WANT="$(echo "$TARGET" | awk -F, '{ printf "要求 (%s,%s) %sx%s", $1, $2, $3, $4 }')"
+      STUBBORN="$(grep -F "が目標に追従しない" "$WORK/19.log" \
+        | grep -F "[${FOCUSED}]" | tail -1 || true)"
+      if [ -n "$STUBBORN" ] && echo "$STUBBORN" | grep -qF "$WANT"; then
+        skip "アプリが最小寸法で縮まないので吸い付きを確かめられない（comet は ${TARGET} を要求している）"
+      else
+        expect_rect_near \
+          "$(field "$LINE" x),$(field "$LINE" y),$(field "$LINE" w),$(field "$LINE" h)" \
+          "$TARGET" 4 "タイルへ戻すと配置に従った"
+      fi
     fi
   fi
   stop_comet

@@ -169,8 +169,11 @@ public final class WorkspaceIndicator {
         statusItem = item
         let segments = Self.segments(status, names: names)
         item.button?.attributedTitle = Self.attributedTitle(segments)
-        // 表示専用。押しても何も起きないのでクリックを受け付けない。
-        item.button?.isEnabled = false
+        // **`isEnabled = false` にしてはいけない。** 無効にしたボタンは
+        // `attributedTitle` を**完全に透明で描く**ので、項目の幅は確保されるのに
+        // 画面には何も出ない（macOS 15 で実測。素の `title` なら薄く描かれるが、
+        // 強調で区別するには属性付きの文字列が要る）。
+        // 押しても何も起きないのは target/action を持たせていないためで、無効化は要らない。
         item.button?.toolTip =
             "comet: ワークスペース \(current)/\(total)"
             + (names[current].map { "（\($0)）" } ?? "")
@@ -182,6 +185,10 @@ public final class WorkspaceIndicator {
         // - Important: **この座標を当てにして画面を撮ってはいけない。**
         //   2画面では実際に描かれている場所と食い違う値が返る
         //   （実測: 2台目のメニューバーに出ているのに x=3840 幅=29。その x は画面の外）。
+        //   1画面でも食い違う（実測: ここが (0, -24) を返している間に、CGWindowList は
+        //   同じ項目を x=1553 y=0 29x24＝メニューバーの正しい場所に見ていた）。
+        //   **どこに出ているかを調べるときは CGWindowList を見る**
+        //   （`comet-probe windows --any-layer`）。
         //   縦位置はさらに当てにならない（作った直後は高さ 0、y は画面の外を指す）。
         //   画素で確かめるときは位置を当てず、メニューバーの帯全体の差を見る
         //   （`scripts/verify.sh` の `capture_menubars`）。
