@@ -14,7 +14,12 @@ SIGNING_IDENTITY="comet-dev"
 BUNDLE_ID="local.comet"
 
 echo "==> ビルド ($CONFIGURATION)"
-swift build -c "$CONFIGURATION"
+# bash 3.2 + set -u では空配列の展開がエラーになるため要素数で分岐する。
+if [ ${#COMET_OVERLAY_FLAGS[@]} -gt 0 ]; then
+  swift build -c "$CONFIGURATION" "${COMET_OVERLAY_FLAGS[@]}"
+else
+  swift build -c "$CONFIGURATION"
+fi
 
 # --show-bin-path が進捗行を混ぜて出すことがあるので最終行だけ取る。
 BIN_PATH="$(swift build -c "$CONFIGURATION" --show-bin-path | tail -1)/comet"

@@ -36,3 +36,9 @@ if [ -d "$DEV_FRAMEWORKS/Testing.framework" ]; then
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# 壊れた module.modulemap が残っている Mac への回避。健全な環境では何もしない。
+# COMET_OVERLAY_FLAGS（空のことがある）と SWIFT_EXEC_MANIFEST を設定する。
+developerDir="$DEV_ROOT"
+workaroundDir="$REPO_ROOT/.build/modulemap-workaround"
+source "$REPO_ROOT/scripts/modulemap-workaround.sh"
