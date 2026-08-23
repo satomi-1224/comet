@@ -55,6 +55,9 @@ BSP ツリーでウィンドウを自動的に並べ、キーボードだけで�
 - Swift 6 ツールチェイン（Xcode は不要。Command Line Tools だけで組める）
 - アクセシビリティ権限
 
+Nix で入れる場合も**コンパイラはホストのものを借ります**（nixpkgs の Swift は 5.10 で
+足りないため）。詳しくは[ビルドについて](#ビルドについて)を見てください。
+
 ## インストール
 
 ### Nix で入れる
@@ -67,6 +70,10 @@ nix run github:satomi-1224/comet#make-signing-cert
 
 # 2. 組んで ~/Applications へ入れて起動する
 nix run github:satomi-1224/comet#install
+
+# 3. 設定の雛形を置く（下の「宣言的に持つ」なら要りません）
+mkdir -p ~/.config/comet
+~/Applications/comet.app/Contents/MacOS/comet --print-default-config > ~/.config/comet/config.toml
 ```
 
 設定と自動起動まで宣言的に持ちたい場合は
@@ -150,15 +157,18 @@ flake を input に足して、使っている仕組みに合わせてモジュ�
   # nix-darwin の設定
   imports = [ inputs.comet.darwinModules.default ];
 
+  # nix-darwin は launchd.user.agents を使う構成にこれを要求します
+  system.primaryUser = "あなたのユーザ名";
+
   services.comet = {
     enable = true;
-    user = "あなたのユーザ名";   # 省略時は system.primaryUser
     settings = { /* 上と同じ */ };
   };
 }
 ```
 
 `services.comet` の選択肢は `programs.comet` と同じです（`user` だけ増えます）。
+`user` を書くのは、`system.primaryUser` とは**別の利用者**で動かしたいときだけです。
 
 > [!NOTE]
 > nix-darwin の activation は root で走り、`sudo -u` で利用者へ降ります。
@@ -231,8 +241,10 @@ Swift は 5.10 のためです。そのためパッケージは `__noChroot = tr
 > [!TIP]
 > `import Foundation` を含むコンパイルが
 > `redefinition of module 'SwiftBridging'` で落ちる Mac があります。
-> Xcode 15 期の `<toolchain>/usr/include/swift/module.modulemap` が残っているのが原因で、
-> パッケージ側で VFS overlay を使って自動的に回避します。
+> Xcode 15 期の `<toolchain>/usr/include/swift/module.modulemap` が残っているのが原因です。
+> `scripts/modulemap-workaround.sh` が VFS overlay で自動的に回避するので、
+> Nix ビルドでも `./scripts/build-app.sh` / `./scripts/test.sh` でも意識は要りません
+> （二重定義を見つけたときだけ効きます）。
 > 恒久的に直すなら `sudo mv <toolchain>/usr/include/swift/module.modulemap{,.disabled}`。
 
 #### flake の出力
@@ -433,6 +445,15 @@ i3 の綴りもそのまま通ります（`kill` / `reload` / `quit` / `split h`
 常駐している comet へ UNIX ドメインソケット経由でコマンドを送れます。
 **設定に書ける綴りがそのまま使えます。**
 
+> [!NOTE]
+> `comet` を PATH に置く方法。Nix のモジュールを使っているなら**そのまま使えます**
+> （本体とは別に `bin/comet` だけを PATH へ入れています）。そうでなければ
+> バンドルの中を指す symlink を張ってください。
+>
+> ```bash
+> ln -s ~/Applications/comet.app/Contents/MacOS/comet ~/.local/bin/comet
+> ```
+
 ```bash
 comet --send "workspace 3"
 comet --send "move-node-to-monitor next"
@@ -546,16 +567,18 @@ AX 上ふつうのウィンドウに見えるため、`kCGWindowLayer`（通常�
 
 ```bash
 swift build                 # ビルド
-./scripts/test.sh           # 単体テスト（648 件）
-./scripts/verify.sh         # 実機検証（77 項目。実際にウィンドウを動かして画素と座標で判定）
+./scripts/test.sh           # 単体テスト（741 件）
+./scripts/verify.sh         # 実機検証（27 節 103 項目。実際にウィンドウを動かして画素と座標で判定）
 ./scripts/build-app.sh      # .app を組み立てる
 nix build .#comet           # .app を Nix で組む（冷えた状態から組み直す）
 nix develop                 # 開発用のシェル
 ```
 
 > [!NOTE]
-> Xcode を入れていない環境では `swift test` が Foundation の解決に失敗します。
-> `./scripts/test.sh` が必要な設定を渡すので、テストはこちらから実行してください。
+> **`swift test` を直に叩かないでください。** Xcode を入れていない環境では
+> Testing.framework の解決に失敗します。また、壊れた `module.modulemap` が残っている
+> Mac では冷えた状態からのビルドが通りません。`./scripts/test.sh` が
+> `scripts/env.sh` 経由で両方の設定を渡します。
 
 `scripts/verify.sh` は実際にウィンドウを開き、合成キー・合成ドラッグを送り、
 画面を撮って画素で判定します（枠線が描かれているか、壁紙が切り替わったか、
