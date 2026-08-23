@@ -1,6 +1,6 @@
 # comet の home-manager モジュール。本体・設定・自動起動をまとめて宣言する。
 #
-# 使い方は README の「Nix で使う」を見ること。
+# 使い方は docs/nix.md を見ること。
 #
 #   nix flake update comet && home-manager switch
 #
