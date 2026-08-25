@@ -28,11 +28,27 @@ public struct TargetFrame: Equatable, Sendable {
 public struct FrameRequest: Equatable, Sendable {
     public let windowID: CGWindowID
     public let target: TargetFrame
+    /// 発行ごとに異なる識別子。
+    ///
+    /// `forget` しても、すでに AX へ渡した処理そのものは止められない。その完了が
+    /// あとから返ったとき、同じウィンドウ ID の新しい要求と取り違えないために使う。
+    public let requestID: UInt64
 
-    public init(windowID: CGWindowID, target: TargetFrame) {
+    public init(windowID: CGWindowID, target: TargetFrame, requestID: UInt64 = 0) {
         self.windowID = windowID
         self.target = target
+        self.requestID = requestID
     }
+}
+
+/// 発行済み要求の完了を、現在の目標との関係で分類したもの。
+public enum FrameCompletion: Equatable, Sendable {
+    /// 今も最新の要求（同じ目標の再投入を含む）。結果の反映と補正を続けてよい。
+    case current
+    /// 適用中に別の目標が届いた。古い結果で状態や新しい目標を上書きしてはいけない。
+    case superseded
+    /// `forget` 済み、または同じウィンドウ ID に対する過去の要求。
+    case discarded
 }
 
 /// 目標矩形を合成し、無駄な AX 呼び出しを削る。
@@ -58,7 +74,13 @@ public struct FrameCoalescer {
     private var pendingOrder: [CGWindowID] = []
     /// 最後に「発行した」目標。実際に反映されたかは問わない。
     private var applied: [CGWindowID: TargetFrame] = [:]
-    private var inFlight: Set<CGWindowID> = []
+    /// 適用中の要求。値は発行ごとに異なる ID。
+    ///
+    /// ウィンドウ ID だけでは、`forget` 前の古い完了と、その後に発行した新しい要求を
+    /// 区別できない。古い完了で新しい適用中フラグを消すと、同じ窓へ複数の AX 書き込みが
+    /// 並行してしまう。
+    private var inFlight: [CGWindowID: UInt64] = [:]
+    private var nextRequestID: UInt64 = 0
 
     private let tolerance: CGFloat
 
@@ -104,7 +126,7 @@ public struct FrameCoalescer {
             guard let target = pending[windowID] else { continue }
 
             // 適用中なら完了を待つ。順序上の位置は保つ。
-            if inFlight.contains(windowID) {
+            if inFlight[windowID] != nil {
                 stillPending.append(windowID)
                 continue
             }
@@ -115,19 +137,30 @@ public struct FrameCoalescer {
                 continue
             }
 
-            inFlight.insert(windowID)
+            // 0 は外から組み立てた `FrameRequest` の既定値として予約する。
+            repeat { nextRequestID &+= 1 } while nextRequestID == 0
+            let requestID = nextRequestID
+            inFlight[windowID] = requestID
             applied[windowID] = target
             pending.removeValue(forKey: windowID)
-            requests.append(FrameRequest(windowID: windowID, target: target))
+            requests.append(
+                FrameRequest(windowID: windowID, target: target, requestID: requestID))
         }
 
         pendingOrder = stillPending
         return requests
     }
 
-    /// 適用が完了したことを通知する。知らないウィンドウでも無害。
-    public mutating func complete(_ windowID: CGWindowID) {
-        inFlight.remove(windowID)
+    /// 適用が完了したことを通知する。
+    ///
+    /// - Returns: 今の目標との関係。適用中に新しい目標が届いていれば
+    ///   ``FrameCompletion/superseded`` として返し、古い補正による巻き戻しを防ぐ。
+    @discardableResult
+    public mutating func complete(_ request: FrameRequest) -> FrameCompletion {
+        guard inFlight[request.windowID] == request.requestID else { return .discarded }
+        inFlight.removeValue(forKey: request.windowID)
+        guard let newer = pending[request.windowID] else { return .current }
+        return isUnchanged(from: request.target, to: newer) ? .current : .superseded
     }
 
     /// 適用履歴を破棄する。
@@ -147,7 +180,7 @@ public struct FrameCoalescer {
         pending.removeValue(forKey: windowID)
         pendingOrder.removeAll { $0 == windowID }
         applied.removeValue(forKey: windowID)
-        inFlight.remove(windowID)
+        inFlight.removeValue(forKey: windowID)
     }
 
     // MARK: - 状態
@@ -162,7 +195,7 @@ public struct FrameCoalescer {
 
     /// 待機中または適用中か。外部からの変更と自分の適用を区別するのに使う。
     public func isActive(_ windowID: CGWindowID) -> Bool {
-        pending[windowID] != nil || inFlight.contains(windowID)
+        pending[windowID] != nil || inFlight[windowID] != nil
     }
 
     /// 最後に発行した矩形。AX 通知で観測した実結果との突き合わせに使う。

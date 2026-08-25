@@ -319,6 +319,23 @@ expect_rect_near() {
   fi
 }
 
+# 位置の入れ替わりは許し、寸法だけが許容差の内側かを見る。
+# ネイティブ全画面から戻るとツリーへ再挿入されるため、同じタイル区画へ戻るとは限らない。
+expect_size_near() {
+  local got="$1" want="$2" tolerance="$3" label="$4"
+  if [ -z "$got" ] || [ -z "$want" ]; then ng "${label}（矩形が取れなかった）"; return; fi
+  local diff
+  diff="$(echo "$got $want" | awk -F'[ ,]' '{
+    dw = $3 - $7; if (dw < 0) dw = -dw
+    dh = $4 - $8; if (dh < 0) dh = -dh
+    print (dw > dh ? dw : dh)
+  }')"
+  if [ "$diff" -le "$tolerance" ]; then ok "${label}（寸法差 ${diff}pt）"; else
+    ng "${label}（寸法差 ${diff}pt、$tolerance 以内を期待）"
+    echo "        実測 $got / 期待 $want"
+  fi
+}
+
 # 画面を撮る。撮影は端末が持っている画面収録の権限で行う（comet には要求しない）。
 capture() {
   screencapture -x "$1" 2>/dev/null
@@ -1461,6 +1478,16 @@ else
 
   # (c) ネイティブフルスクリーン。専用の操作スペースが画面を占める。
   activate_test_windows
+  NATIVE_ID="$("$APP" --query windows 2>/dev/null | grep ' focus=\* ' \
+    | head -1 | sed -E 's/^id=([0-9]+).*/\1/' || true)"
+  NATIVE_BEFORE=""
+  if [ -n "$NATIVE_ID" ]; then
+    LINE="$("$PROBE" windows --any-layer | grep "^id=${NATIVE_ID} " || true)"
+    if [ -n "$LINE" ]; then
+      NATIVE_BEFORE="$(field "$LINE" x),$(field "$LINE" y),$(field "$LINE" w),$(field "$LINE" h)"
+    fi
+  fi
+  NATIVE_LOG_MARK="$(wc -l <"$WORK/16.log" | tr -d ' ')"
   osascript -e 'tell application "System Events" to keystroke "f" using {control down, command down}' \
     >/dev/null 2>&1
   sleep 5
@@ -1475,6 +1502,18 @@ else
   else
     skip "ネイティブフルスクリーンにできなかった（キー送出が届いていない）"
   fi
+  # AXFullScreen が true になるまでの短い間も、全画面の寸法をアプリの下限として
+  # 学習してはいけない。これが Chrome だけ解除後に並ばなくなった直接の原因だった。
+  if [ -z "$NATIVE_ID" ]; then
+    skip "全画面にしたウィンドウの ID を取れず、最小寸法の学習は判定できない"
+  elif tail -n "+$((NATIVE_LOG_MARK + 1))" "$WORK/16.log" \
+    | grep -qE "\[${NATIVE_ID}\] の最小寸法を学習"; then
+    ng "ネイティブ全画面の寸法を最小寸法として学習した"
+    tail -n "+$((NATIVE_LOG_MARK + 1))" "$WORK/16.log" \
+      | grep -E "\[${NATIVE_ID}\] の最小寸法を学習" | head -2 | sed 's/^/        /'
+  else
+    ok "ネイティブ全画面の寸法を最小寸法として学習していない"
+  fi
   # 元へ戻す。戻せないと後片付けで書類を閉じられない。
   osascript -e 'tell application "System Events" to keystroke "f" using {control down, command down}' \
     >/dev/null 2>&1
@@ -1487,6 +1526,32 @@ else
     ok "全画面をやめると枠線が戻る"
   else
     ng "全画面をやめても枠線が戻らない"
+  fi
+  # 枠線はフローティングにも出る。全画面を「追従しないアプリ」と誤認して恒久的に
+  # フローティングへ降格していても上の判定だけなら通るため、管理状態も直接見る。
+  NATIVE_RECORD=""
+  if [ -n "$NATIVE_ID" ]; then
+    NATIVE_RECORD="$({ "$APP" --query windows 2>/dev/null || true; } \
+      | grep "^id=${NATIVE_ID} " | head -1 || true)"
+  fi
+  if [ -z "$NATIVE_ID" ]; then
+    skip "全画面にしたウィンドウの ID を取れず、タイル管理への復帰は判定できない"
+  elif [ "$(field "$NATIVE_RECORD" kind)" = "tiled" ]; then
+    ok "全画面をやめるとタイル管理へ戻る"
+  else
+    ng "全画面をやめてもタイル管理へ戻らない（kind=$(field "$NATIVE_RECORD" kind)）"
+  fi
+  # 枠線が戻るだけでは足りない。全画面中の実測を「最小寸法」として誤学習すると、
+  # 台帳上はタイルへ戻っても1枚だけ画面幅を占有し、他の窓が端へ潰れる。
+  # 実際に以前の検証はそれを見逃していたため、同じ窓が通常のタイル寸法へ戻るまで見る。
+  # 全画面中はツリーから外れるので、再挿入後の区画（x, y）は変わってよい。
+  if [ -n "$NATIVE_ID" ] && [ -n "$NATIVE_BEFORE" ]; then
+    LINE="$("$PROBE" windows --any-layer | grep "^id=${NATIVE_ID} " || true)"
+    NATIVE_AFTER="$(field "$LINE" x),$(field "$LINE" y),$(field "$LINE" w),$(field "$LINE" h)"
+    expect_size_near "$NATIVE_AFTER" "$NATIVE_BEFORE" 6 \
+      "全画面をやめると通常のタイル寸法へ戻る"
+  else
+    skip "全画面にしたウィンドウの ID を取れず、元の区画との比較はできない"
   fi
 fi
 stop_comet

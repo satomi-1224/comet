@@ -61,10 +61,30 @@ else
   open "$DESTINATION"
 fi
 
-sleep 4
-if pgrep -f "$DESTINATION/Contents/MacOS/comet" >/dev/null; then
-  echo "==> 完了。${DESTINATION} で稼働中"
+# プロセスが居るだけでは起動完了とは限らない。アクセシビリティ権限が無いと
+# comet は最大120秒待機するため、以前は操作不能なのに「稼働中」と表示していた。
+# 実際の問い合わせへ応答できて初めて完了とする。
+READY=0
+for _ in {1..10}; do
+  if "$DESTINATION/Contents/MacOS/comet" --query state >/dev/null 2>&1; then
+    READY=1
+    break
+  fi
+  if ! pgrep -f "$DESTINATION/Contents/MacOS/comet" >/dev/null; then
+    break
+  fi
+  sleep 1
+done
+
+if [ "$READY" = "1" ]; then
+  echo "==> 完了。${DESTINATION} で稼働中（問い合わせ応答を確認）"
+elif pgrep -f "$DESTINATION/Contents/MacOS/comet" >/dev/null; then
+  echo "==> comet は起動したが、まだ操作できない" >&2
+  echo "    アクセシビリティ権限の許可待ちと思われる。" >&2
+  echo "    「システム設定 > プライバシーとセキュリティ > アクセシビリティ」で" >&2
+  echo "    comet を有効にすると、そのまま起動を続ける。" >&2
+  exit 1
 else
-  echo "==> 起動を確認できなかった。ログ: ~/Library/Logs/comet.log" >&2
+  echo "==> 起動を確認できなかった。comet を開いて表示される案内を確認する" >&2
   exit 1
 fi

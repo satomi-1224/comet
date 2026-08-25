@@ -56,8 +56,8 @@ struct FrameCoalescerTests {
     func completeClearsInFlight() {
         var coalescer = FrameCoalescer()
         coalescer.submit(1, target(100))
-        _ = coalescer.drain()
-        coalescer.complete(1)
+        let request = coalescer.drain()[0]
+        _ = coalescer.complete(request)
 
         #expect(coalescer.inFlightCount == 0)
         #expect(coalescer.isIdle)
@@ -84,7 +84,7 @@ struct FrameCoalescerTests {
     func submitsDuringInFlightCollapse() {
         var coalescer = FrameCoalescer()
         coalescer.submit(1, target(100))
-        _ = coalescer.drain()
+        let initial = coalescer.drain()[0]
 
         for step in 2...20 {
             coalescer.submit(1, target(CGFloat(step) * 100))
@@ -92,7 +92,7 @@ struct FrameCoalescerTests {
 
         #expect(coalescer.drain().isEmpty, "適用中は追加発行しない")
 
-        coalescer.complete(1)
+        _ = coalescer.complete(initial)
         let requests = coalescer.drain()
         #expect(requests.count == 1)
         #expect(requests[0].target.rect.width == 2000, "中間の18件は捨てられる")
@@ -115,8 +115,8 @@ struct FrameCoalescerTests {
     func unchangedTargetIsSkipped() {
         var coalescer = FrameCoalescer()
         coalescer.submit(1, target(100))
-        _ = coalescer.drain()
-        coalescer.complete(1)
+        let request = coalescer.drain()[0]
+        _ = coalescer.complete(request)
 
         coalescer.submit(1, target(100))
         #expect(coalescer.drain().isEmpty, "同じ矩形なら AX 呼び出しは不要")
@@ -127,8 +127,8 @@ struct FrameCoalescerTests {
     func withinToleranceIsSkipped() {
         var coalescer = FrameCoalescer(tolerance: 0.5)
         coalescer.submit(1, target(100))
-        _ = coalescer.drain()
-        coalescer.complete(1)
+        let request = coalescer.drain()[0]
+        _ = coalescer.complete(request)
 
         coalescer.submit(1, target(100.2))
         #expect(coalescer.drain().isEmpty)
@@ -138,8 +138,8 @@ struct FrameCoalescerTests {
     func beyondToleranceIsIssued() {
         var coalescer = FrameCoalescer(tolerance: 0.5)
         coalescer.submit(1, target(100))
-        _ = coalescer.drain()
-        coalescer.complete(1)
+        let request = coalescer.drain()[0]
+        _ = coalescer.complete(request)
 
         coalescer.submit(1, target(101))
         #expect(coalescer.drain().count == 1)
@@ -151,8 +151,8 @@ struct FrameCoalescerTests {
     func setSizeChangeIsIssued() {
         var coalescer = FrameCoalescer()
         coalescer.submit(1, target(100, setSize: false))
-        _ = coalescer.drain()
-        coalescer.complete(1)
+        let request = coalescer.drain()[0]
+        _ = coalescer.complete(request)
 
         coalescer.submit(1, target(100, setSize: true))
         let requests = coalescer.drain()
@@ -166,8 +166,8 @@ struct FrameCoalescerTests {
     func verifyChangeIsIssued() {
         var coalescer = FrameCoalescer()
         coalescer.submit(1, TargetFrame(rect: rect(100), verify: false))
-        _ = coalescer.drain()
-        coalescer.complete(1)
+        let request = coalescer.drain()[0]
+        _ = coalescer.complete(request)
 
         coalescer.submit(1, TargetFrame(rect: rect(100), verify: true))
         let requests = coalescer.drain()
@@ -222,18 +222,66 @@ struct FrameCoalescerTests {
     func completeAfterForgetIsHarmless() {
         var coalescer = FrameCoalescer()
         coalescer.submit(1, target(100))
-        _ = coalescer.drain()
+        let stale = coalescer.drain()[0]
         coalescer.forget(1)
-        coalescer.complete(1)
+        let completion = coalescer.complete(stale)
+        #expect(completion == .discarded)
         #expect(coalescer.isIdle)
+    }
+
+    /// 今回の Chrome の不具合の直接の競合。全画面へ移った時点で `forget` しても、
+    /// AX へ発行済みの適用はあとから完了する。同じウィンドウ ID の新しい要求を
+    /// 古い完了で片付けてはいけない。
+    @Test("forget 前の完了は同じ ID の新しい要求へ影響しない")
+    func staleCompletionDoesNotCompleteReplacement() {
+        var coalescer = FrameCoalescer()
+        coalescer.submit(1, target(100))
+        let stale = coalescer.drain()[0]
+
+        coalescer.forget(1)
+        coalescer.submit(1, target(200))
+        let current = coalescer.drain()[0]
+
+        #expect(stale.requestID != current.requestID)
+        let staleCompletion = coalescer.complete(stale)
+        #expect(staleCompletion == .discarded)
+        #expect(coalescer.inFlightCount == 1, "現在の要求は適用中のまま")
+        let currentCompletion = coalescer.complete(current)
+        #expect(currentCompletion == .current)
+        #expect(coalescer.isIdle)
+    }
+
+    /// キー連射では A の適用中に B が待機する。A の完了後に補正 A を積むと
+    /// B を上書きし、利用者には「一度戻ってから進む」ように見える。
+    @Test("適用中に届いた別の目標は古い完了を置換済みにする")
+    func newerTargetSupersedesCompletion() {
+        var coalescer = FrameCoalescer()
+        coalescer.submit(1, target(100))
+        let old = coalescer.drain()[0]
+        coalescer.submit(1, target(200))
+
+        #expect(coalescer.complete(old) == .superseded)
+        let newest = coalescer.drain()
+        #expect(newest.count == 1)
+        #expect(newest[0].target == target(200))
+    }
+
+    @Test("適用中に同じ目標が再投入されても現在の完了として扱う")
+    func duplicateTargetDoesNotSupersedeCompletion() {
+        var coalescer = FrameCoalescer()
+        coalescer.submit(1, target(100))
+        let request = coalescer.drain()[0]
+        coalescer.submit(1, target(100))
+
+        #expect(coalescer.complete(request) == .current)
     }
 
     @Test("forget 後に同じ矩形を submit すると再び発行される")
     func forgetResetsAppliedFrame() {
         var coalescer = FrameCoalescer()
         coalescer.submit(1, target(100))
-        _ = coalescer.drain()
-        coalescer.complete(1)
+        let request = coalescer.drain()[0]
+        _ = coalescer.complete(request)
         coalescer.forget(1)
 
         coalescer.submit(1, target(100))
@@ -248,8 +296,8 @@ struct FrameCoalescerTests {
     func invalidateAllowsResubmit() {
         var coalescer = FrameCoalescer()
         coalescer.submit(1, target(100))
-        _ = coalescer.drain()
-        coalescer.complete(1)
+        let request = coalescer.drain()[0]
+        _ = coalescer.complete(request)
 
         coalescer.submit(1, target(100))
         #expect(coalescer.drain().isEmpty, "履歴があるうちは発行しない")
@@ -280,10 +328,10 @@ struct FrameCoalescerTests {
         coalescer.submit(1, target(100))
         #expect(coalescer.isActive(1), "待機中")
 
-        _ = coalescer.drain()
+        let request = coalescer.drain()[0]
         #expect(coalescer.isActive(1), "適用中")
 
-        coalescer.complete(1)
+        _ = coalescer.complete(request)
         #expect(!coalescer.isActive(1), "完了後は自分の作業ではない")
     }
 
@@ -297,7 +345,9 @@ struct FrameCoalescerTests {
     @Test("知らないウィンドウの complete は無害")
     func completeUnknownIsHarmless() {
         var coalescer = FrameCoalescer()
-        coalescer.complete(999)
+        let unknown = FrameRequest(windowID: 999, target: target(100), requestID: 999)
+        let completion = coalescer.complete(unknown)
+        #expect(completion == .discarded)
         #expect(coalescer.isIdle)
     }
 

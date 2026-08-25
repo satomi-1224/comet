@@ -3172,17 +3172,21 @@ public final class Engine: WindowResolving {
         if !succeeded {
             log.debug("適用に失敗 [\(id)]")
         }
+        let disposition = registry[id]?.disposition
         // 読み戻せた場合はそれを記録する。読めなかった場合（位置のみ設定など）は
         // 楽観的に目標を記録しておく。
         registry.update(id) { $0.observedFrame = observed ?? target }
 
         guard let observed else { return }
         // 目標に届かなかった場合は枠線を実測値へ合わせ直す。
-        if id == focusedWindowID,
+        if disposition?.showsFocusBorder == true, id == focusedWindowID,
             !Geometry.isApproximatelyEqual(observed, target, tolerance: 1)
         {
             notifyFocusedFrame(measured: (id: id, frame: observed))
         }
+        // 最小寸法はタイルの割り当てにだけ使う。状態変更と入れ違いで完了した結果や、
+        // フローティングの手動リサイズから学ぶと、タイルへ戻ったときの配置を汚す。
+        guard disposition?.isTiled == true else { return }
         learnMinimum(id, target: target, observed: observed)
     }
 
@@ -3228,7 +3232,7 @@ public final class Engine: WindowResolving {
         // 形では見分けられない。Chrome の全画面ウィンドウは画面全体ではなく
         // 自前のタブ帯を除いた (0,138) 2560x1526 になる（実測）。落ち着いたあとに
         // 属性を読み直せば `true` が返る（実測）ので、降格の前にそれだけ確かめる。
-        // ここは3回の補正に失敗したあとの稀な経路なので、1往復増やしてよい。
+        // ここは補正しても同じ実測が続いたあとの稀な経路なので、1往復増やしてよい。
         guard let element = elements[id], let pid = registry[id]?.pid else {
             demoteToFloating(id, target: target, observed: observed)
             return
@@ -3287,20 +3291,13 @@ public final class Engine: WindowResolving {
     /// 兄弟同士の下限が同時に満たせない場合は比例配分に落ちるが、
     /// そこでも学習値は増えないので再配置は繰り返されない。
     private func learnMinimum(_ id: CGWindowID, target: CGRect, observed: CGRect) {
-        let slack: CGFloat = 1
-        var learned = minimumSizes[id] ?? .zero
-        var changed = false
-
-        if observed.width > target.width + slack, observed.width > learned.width {
-            learned.width = observed.width
-            changed = true
-        }
-        if observed.height > target.height + slack, observed.height > learned.height {
-            learned.height = observed.height
-            changed = true
-        }
-
-        guard changed else { return }
+        // ネイティブ全画面へ入った直後は AXFullScreen が一時的に false のことがある。
+        // その間の実測は画面サイズだが、要求した位置からも外れている。本物の最小寸法は
+        // 左上を保ったまま寸法だけが止まるので、位置まで無視された結果は学習しない。
+        guard
+            let learned = MinimumSizeLearning.updatedSize(
+                current: minimumSizes[id] ?? .zero, target: target, observed: observed)
+        else { return }
         minimumSizes[id] = learned
         log.debug(
             "[\(id)] の最小寸法を学習: \(Int(learned.width))x\(Int(learned.height))"

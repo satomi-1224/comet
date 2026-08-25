@@ -12,7 +12,7 @@ public protocol WindowResolving: AnyObject {
     func pid(for id: CGWindowID) -> pid_t?
     func observedFrame(for id: CGWindowID) -> CGRect?
     func didApply(_ id: CGWindowID, target: CGRect, observed: CGRect?, succeeded: Bool)
-    /// 補正の上限に達しても目標へ追従しなかった。
+    /// 補正しても目標へ追従しないことが確定した。
     ///
     /// 「AX でのリサイズを無視するアプリ」を検出できる唯一の合図。
     func didGiveUp(_ id: CGWindowID, target: CGRect, observed: CGRect)
@@ -50,8 +50,8 @@ public final class FrameScheduler {
     private let log: Log
 
     private var isTicking = false
-    /// 目標どおりにならなかったウィンドウの補正回数。目標が変われば数え直す。
-    private var corrections: [CGWindowID: (target: CGRect, count: Int)] = [:]
+    /// 目標どおりにならなかったウィンドウの補正状態。目標が変われば数え直す。
+    private var corrections = FrameCorrectionTracker()
     /// 最後に適用を終えた時刻。自分の適用による通知を外部からの変更と誤認しないために使う。
     private var settledAt: [CGWindowID: Date] = [:]
 
@@ -96,7 +96,7 @@ public final class FrameScheduler {
 
     public func forget(_ id: CGWindowID) {
         coalescer.forget(id)
-        corrections.removeValue(forKey: id)
+        corrections.forget(id)
         settledAt.removeValue(forKey: id)
     }
 
@@ -144,7 +144,7 @@ public final class FrameScheduler {
 
         guard !isDryRun else {
             // 適用したことにして先へ進める。読み戻しも補正も学習もしない。
-            coalescer.complete(id)
+            coalescer.complete(request)
             return
         }
 
@@ -159,7 +159,7 @@ public final class FrameScheduler {
                 current: current, to: element.raw, timing: timing, pid: pid)
             Task { @MainActor in
                 self.log.trace("適用が完了 [\(id)]")
-                self.finish(id, target: target, result: result)
+                self.finish(request, result: result)
             }
         }
     }
@@ -184,8 +184,30 @@ public final class FrameScheduler {
         kick()
     }
 
-    private func finish(_ id: CGWindowID, target: TargetFrame, result: AXBridge.FrameApplyResult) {
-        coalescer.complete(id)
+    private func finish(_ request: FrameRequest, result: AXBridge.FrameApplyResult) {
+        let id = request.windowID
+        let target = request.target
+
+        // `forget` はキューへ渡した AX 呼び出し自体を取り消せない。全画面へ移った、
+        // 最小化された、閉じられた、といった理由で忘れた後に完了が返ってきても、
+        // その結果を現在の状態へ混ぜない。特に全画面の実測を最小寸法として学習すると、
+        // 解除後も画面いっぱいの寸法を要求し続けてタイリングが壊れる。
+        switch coalescer.complete(request) {
+        case .discarded:
+            log.trace("破棄済みの適用完了を無視 [\(id)]")
+            if coalescer.pendingCount > 0 { kick() }
+            return
+        case .superseded:
+            // キー連射中に A の適用中へ B が届いた場合、A の補正を投げると B を
+            // 上書きしてウィンドウが一度前の位置へ戻る。古い結果は状態にも混ぜず、
+            // 待っている最新目標を直ちに発行する。
+            corrections.forget(id)
+            log.trace("新しい目標があるため古い適用完了を無視 [\(id)]")
+            if coalescer.pendingCount > 0 { kick() }
+            return
+        case .current:
+            break
+        }
         settledAt[id] = Date()
         resolver?.didApply(
             id, target: target.rect, observed: result.observed, succeeded: result.succeeded)
@@ -204,35 +226,31 @@ public final class FrameScheduler {
     /// そのままだと隣との間隔が崩れて重なりや隙間になるので、上限つきで補正する。
     private func correctIfNeeded(_ id: CGWindowID, target: TargetFrame, observed: CGRect?) {
         guard let observed else {
-            corrections.removeValue(forKey: id)
+            corrections.forget(id)
             return
         }
 
-        guard !Geometry.isApproximatelyEqual(observed, target.rect, tolerance: tolerance) else {
-            corrections.removeValue(forKey: id)
-            return
-        }
-
-        // 目標が変わっていれば数え直す。同じ目標に対してだけ上限をかける。
-        var attempt = corrections[id]
-        if let existing = attempt,
-            !Geometry.isApproximatelyEqual(existing.target, target.rect, tolerance: tolerance)
+        switch corrections.evaluate(
+            id, target: target.rect, observed: observed, tolerance: tolerance,
+            maxCorrections: maxCorrections)
         {
-            attempt = nil
-        }
-        let count = (attempt?.count ?? 0) + 1
-
-        guard count <= maxCorrections else {
-            log.warn(
-                "[\(id)] が目標に追従しない。要求 \(rendered(target.rect)) / 実際 \(rendered(observed))。"
-                    + "\(maxCorrections) 回の補正で一致しなかったため諦める（アプリ側の制約と思われる）")
-            corrections.removeValue(forKey: id)
+        case .settled:
+            return
+        case .giveUp(let reason):
+            if reason == .unchangedResult {
+                log.debug(
+                    "[\(id)] が目標に追従しない。要求 \(rendered(target.rect)) / "
+                        + "実際 \(rendered(observed))。同じ実測が続いたため残りの補正を省く")
+            } else {
+                log.warn(
+                    "[\(id)] が目標に追従しない。要求 \(rendered(target.rect)) / 実際 \(rendered(observed))。"
+                        + "\(maxCorrections) 回の補正で一致しなかったため諦める（アプリ側の制約と思われる）")
+            }
             resolver?.didGiveUp(id, target: target.rect, observed: observed)
             return
+        case .retry(let count):
+            log.debug("[\(id)] 補正 \(count)/\(maxCorrections): 実際 \(rendered(observed))")
         }
-
-        corrections[id] = (target: target.rect, count: count)
-        log.debug("[\(id)] 補正 \(count)/\(maxCorrections): 実際 \(rendered(observed))")
 
         // 適用履歴を捨てないと「同じ矩形なので不要」と判定されて発行されない。
         coalescer.invalidate(id)
@@ -245,6 +263,6 @@ public final class FrameScheduler {
     }
 
     public func forgetCorrections(_ id: CGWindowID) {
-        corrections.removeValue(forKey: id)
+        corrections.forget(id)
     }
 }
