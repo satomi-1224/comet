@@ -76,4 +76,30 @@ public enum ScreenWindows {
     public static func layer(of id: CGWindowID) -> Int? {
         snapshot()?[id]?.layer
     }
+
+    /// 候補のうち、画面一覧で通常より上の階層にいるウィンドウ。
+    ///
+    /// 候補の順序を保つ。一覧にいない（まだ表示前、別 Space、取得失敗）ものは、
+    /// 階層が分からないので含めない。
+    static func elevatedWindowIDs(
+        in screen: [CGWindowID: Entry], among candidates: [CGWindowID]
+    ) -> [CGWindowID] {
+        candidates.filter { id in
+            guard let layer = screen[id]?.layer else { return false }
+            return layer != normalLayer
+        }
+    }
+
+    /// 表示前に生成通知が来た新規ウィンドウを、画面一覧へ現れるまで待つか。
+    ///
+    /// 一覧そのものの取得失敗も「まだ見えない」と同じく再試行する。ただし、特殊な
+    /// ウィンドウを永久に取りこぼさないよう最後の試行では取り込みへ進む。
+    static func shouldWaitForVisibility(
+        of id: CGWindowID,
+        in screen: [CGWindowID: Entry]?,
+        attempt: Int,
+        maxAttempts: Int
+    ) -> Bool {
+        screen?[id] == nil && attempt < maxAttempts
+    }
 }
