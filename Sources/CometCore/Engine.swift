@@ -790,13 +790,16 @@ public final class Engine: WindowResolving {
 
     private func register(
         _ windows: [DiscoveredWindow], pid: pid_t, bundleID: String?, immediately: Bool = false,
-        placement: Placement = .byPosition
+        placement: Placement = .byPosition,
+        screen: [CGWindowID: ScreenWindows.Entry]? = nil
     ) {
         guard !windows.isEmpty else { return }
 
         // 階層は AX からは分からないので別に取る。**まとめて1回だけ**（1枚ずつ引くと
         // 往復が増えるうえ、実測でも一覧を取るほうが速い）。
-        let screen = ScreenWindows.snapshot()
+        // 新規生成では、画面へ現れるまで待った呼び出し側のスナップショットを渡せる。
+        // ここで取り直すと、その一瞬に消えた窓を「階層不明」と誤判定してしまう。
+        let screen = screen ?? ScreenWindows.snapshot()
 
         for window in windows {
             let disposition = resolveDisposition(
@@ -2195,17 +2198,51 @@ public final class Engine: WindowResolving {
                 let discovered = DiscoveredWindow(
                     id: id, element: element, attributes: attributes)
                 let bundleID = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
-                // 新しいウィンドウの初回配置は待たせない。**症状A の対策。**
-                // 適用順の先頭に回し、次のランループを待たずにその場で配置する。
-                self.priorityWindows.insert(id)
-                // **新しく開いたウィンドウは今いるモニタへ。** アプリが決めた初期位置
-                // （多くはメイン画面の中央）に従うと、右の画面で作業していても
-                // 左に出てきてしまう。i3 も focused output に開く。
-                self.register(
-                    [discovered], pid: pid, bundleID: bundleID, immediately: true,
-                    placement: .focusedMonitor)
+                self.registerWhenVisible(discovered, pid: pid, bundleID: bundleID)
             }
         }
+    }
+
+    /// 新しく生まれたウィンドウが画面一覧へ現れてから取り込む。
+    ///
+    /// `AXWindowCreated` はウィンドウが表示される**前**に届くことがある。その時点では
+    /// `.optionOnScreenOnly` の一覧に ID が無く、階層を読めない。階層不明を通常窓として
+    /// 即配置すると、常時最前面の PiP に画面いっぱいの寸法を送ってしまう。
+    ///
+    /// 通常窓は既に一覧へ出ていれば待たない。まだなら短く再確認し、それでも現れない
+    /// 特殊なウィンドウだけは従来どおり階層不明として取り込む。
+    private func registerWhenVisible(
+        _ window: DiscoveredWindow, pid: pid_t, bundleID: String?, attempt: Int = 1
+    ) {
+        let screen = ScreenWindows.snapshot()
+        guard
+            !ScreenWindows.shouldWaitForVisibility(
+                of: window.id, in: screen, attempt: attempt,
+                maxAttempts: Self.maxVisibilityAttempts)
+        else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.visibilityRetryDelay) {
+                [weak self] in
+                MainActor.assumeIsolated {
+                    self?.registerWhenVisible(
+                        window, pid: pid, bundleID: bundleID, attempt: attempt + 1)
+                }
+            }
+            return
+        }
+
+        if screen?[window.id] == nil {
+            log.trace(
+                "[\(window.id)] は画面一覧へ現れなかったので階層不明のまま取り込む")
+        }
+        // 新しいウィンドウの初回配置は待たせない。**症状A の対策。**
+        // 適用順の先頭に回し、次のランループを待たずにその場で配置する。
+        priorityWindows.insert(window.id)
+        // **新しく開いたウィンドウは今いるモニタへ。** アプリが決めた初期位置
+        // （多くはメイン画面の中央）に従うと、右の画面で作業していても
+        // 左に出てきてしまう。i3 も focused output に開く。
+        register(
+            [window], pid: pid, bundleID: bundleID, immediately: true,
+            placement: .focusedMonitor, screen: screen)
     }
 
     /// 生成通知を取りこぼしたときに試し直す回数と間隔。
@@ -2214,6 +2251,9 @@ public final class Engine: WindowResolving {
     /// 上限を置くのは、閉じられたウィンドウを延々と追わないため。
     private static let maxAdoptionAttempts = 4
     private static let adoptionRetryDelay: TimeInterval = 0.1
+    /// 表示前に生成通知が来た窓を待つ上限。20ms × 10回 = 最大180ms。
+    private static let maxVisibilityAttempts = 10
+    private static let visibilityRetryDelay: TimeInterval = 0.02
 
     /// アプリのウィンドウを走査し直す。**冪等。** 既知のウィンドウは所属も
     /// フォーカス履歴も保たれる（``register(_:pid:bundleID:immediately:)`` 参照）。
@@ -2506,6 +2546,12 @@ public final class Engine: WindowResolving {
             log.debug("画面を覆うものが消えたので見張りを戻す")
         }
 
+        // 生成直後には通常階層で、表示時に常時最前面へ上がる窓もある。初回判定だけに
+        // 頼ると PiP をタイルとして掴むため、既知のタイルも一覧の階層と突き合わせる。
+        if let screen {
+            excludeElevatedWindows(screen: screen)
+        }
+
         // 取りこぼしの拾い直しは毎周期やる必要がない。走査は AX の往復を伴うので、
         // 見張りより十分に長い間隔にする。
         if guardTicks % Self.reconcileEveryTicks == 0, let screen {
@@ -2528,6 +2574,36 @@ public final class Engine: WindowResolving {
 
     private var dockPID: pid_t?
     private var wasSystemOverlayVisible = false
+
+    /// タイルとして取り込んだあと常時最前面だと分かったウィンドウを管理から外す。
+    ///
+    /// 通知済みの AX 適用は取り消せないが、`scheduler.forget` でその完了と補正を捨て、
+    /// 以後は位置も寸法も触らない。通常は ``registerWhenVisible`` が初回配置前に落とし、
+    /// これはレイヤーの昇格がさらに遅れた場合の保険になる。
+    private func excludeElevatedWindows(screen: [CGWindowID: ScreenWindows.Entry]) {
+        var changed = false
+        for id in ScreenWindows.elevatedWindowIDs(
+            in: screen, among: registry.tiledIDs)
+        {
+            guard let entry = screen[id] else { continue }
+            let title = registry[id]?.title?.prefix(50) ?? "?"
+            registry.update(id) {
+                $0.disposition = .unmanaged(.alwaysOnTop)
+                $0.observedFrame = entry.bounds
+            }
+            scheduler.forget(id)
+            minimumSizes.removeValue(forKey: id)
+            desiredFrames.removeValue(forKey: id)
+            stashedFrames.removeValue(forKey: id)
+            priorityWindows.remove(id)
+            restoreAttempts.removeValue(forKey: id)
+            toleratedFrames.removeValue(forKey: id)
+            layoutGuard.forget(id)
+            log.debug("除外 [\(id)] \(title): \(UnmanagedReason.alwaysOnTop)")
+            changed = true
+        }
+        if changed { relayout() }
+    }
 
     private var guardTicks = 0
     /// 取りこぼしの拾い直しを行う周期（見張り何回ぶんか）。0.5秒 × 20 = 10秒。

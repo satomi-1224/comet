@@ -142,11 +142,9 @@ struct SecondaryMonitorTests {
     }
 }
 
-/// `CGWindowList` から持ち主のプロセスを読む。
-///
-/// 取りこぼしたウィンドウを見つけるのに要る（``MissingWindowFinder``）。
-@Suite("画面一覧の持ち主")
-struct ScreenWindowsOwnerTests {
+/// `CGWindowList` から、タイル判定と取りこぼし検出に使う情報を読む。
+@Suite("画面一覧")
+struct ScreenWindowsTests {
 
     @Test("持ち主のプロセスを読む")
     func readsTheOwnerPID() {
@@ -167,5 +165,52 @@ struct ScreenWindowsOwnerTests {
             [kCGWindowNumber as String: CGWindowID(8), kCGWindowLayer as String: 0]
         ])
         #expect(parsed[8]?.ownerPID == 0)
+    }
+
+    /// PiP の生成通知が表示より先に来ると、初回は一覧にいないことがある。
+    /// 表示後の見張りでは、通常窓だけを残して PiP を拾い直せる必要がある。
+    @Test("既知のタイルから常時最前面へ昇格した窓を選ぶ")
+    func findsElevatedKnownWindows() {
+        let screen = [
+            CGWindowID(1): ScreenWindows.Entry(layer: 0, bounds: .zero),
+            CGWindowID(2): ScreenWindows.Entry(layer: 3, bounds: .zero),
+            CGWindowID(3): ScreenWindows.Entry(layer: 8, bounds: .zero),
+        ]
+
+        #expect(
+            ScreenWindows.elevatedWindowIDs(in: screen, among: [3, 1, 9, 2]) == [3, 2])
+    }
+
+    @Test("画面一覧にまだいない窓は昇格したとは決めつけない")
+    func missingWindowsAreNotAssumedElevated() {
+        let screen = [
+            CGWindowID(1): ScreenWindows.Entry(layer: 0, bounds: .zero)
+        ]
+
+        #expect(ScreenWindows.elevatedWindowIDs(in: screen, among: [1, 2]).isEmpty)
+    }
+
+    @Test("生成通知が表示より先なら画面一覧へ現れるまで待つ")
+    func waitsForAWindowToBecomeVisible() {
+        let screen = [
+            CGWindowID(1): ScreenWindows.Entry(layer: 0, bounds: .zero)
+        ]
+
+        #expect(
+            ScreenWindows.shouldWaitForVisibility(
+                of: 2, in: screen, attempt: 1, maxAttempts: 10))
+        #expect(
+            ScreenWindows.shouldWaitForVisibility(
+                of: 2, in: nil, attempt: 1, maxAttempts: 10))
+        #expect(
+            !ScreenWindows.shouldWaitForVisibility(
+                of: 1, in: screen, attempt: 1, maxAttempts: 10))
+    }
+
+    @Test("画面一覧へ現れない特殊な窓も最後には取り込む")
+    func eventuallyAdoptsAnInvisibleWindow() {
+        #expect(
+            !ScreenWindows.shouldWaitForVisibility(
+                of: 2, in: [:], attempt: 10, maxAttempts: 10))
     }
 }
